@@ -3,15 +3,14 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::io::{BufWriter, Write};
-use std::mem;
 use std::path::{self, PathBuf};
 use std::process::exit;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, sleep};
 use std::time::Duration;
 
-use glob::glob;
-use notify::{recommended_watcher, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
 use serde::Deserialize;
 
 #[cfg(target_os = "linux")]
@@ -79,21 +78,38 @@ enum Request {
     Unregister(usize),
 }
 
-struct Event {
-    uid: usize,
-    event: EventType,
-    path: String,
-}
-
-fn event_listener(receiver: Receiver<Event>) {
+fn event_listener(
+    configs: Arc<Mutex<BTreeMap<usize, (PathBuf, impl Fn(EventType, &[PathBuf]) -> Vec<String>)>>>,
+    receiver: Receiver<notify::Result<Event>>,
+) {
     let throttle = Duration::from_millis(400);
 
     let mut stdout = BufWriter::new(io::stdout());
     loop {
         let mut written = false;
         for event in receiver.try_iter() {
-            writeln!(stdout, "{}:{}:{}", event.uid, event.event, event.path).unwrap();
-            written = true;
+            let event = match event {
+                Ok(event) => event,
+                Err(e) => {
+                    eprintln!("watcher error: {e:?}");
+                    continue;
+                }
+            };
+
+            let event_type = match event.kind {
+                EventKind::Create(_) => EventType::Create,
+                EventKind::Modify(_) => EventType::Change,
+                EventKind::Remove(_) => EventType::Delete,
+                _ => continue,
+            };
+
+            for (uid, (_, cb)) in configs.lock().unwrap().iter() {
+                let paths = cb(event_type, &event.paths);
+                for path in paths {
+                    writeln!(stdout, "{}:{}:{}", uid, event_type, path).unwrap();
+                    written = true;
+                }
+            }
         }
         if written {
             writeln!(stdout, "<flush>").unwrap();
@@ -103,123 +119,100 @@ fn event_listener(receiver: Receiver<Event>) {
     }
 }
 
-fn new_watcher(
-    mut config: WatcherConfig,
-    sender: Sender<Event>,
-) -> notify::Result<RecommendedWatcher> {
-    let paths = mem::take(&mut config.patterns);
-    let cwd = PathBuf::from(mem::take(&mut config.cwd)).canonicalize()?;
+fn new_watcher(config: WatcherConfig) -> (PathBuf, impl Fn(EventType, &[PathBuf]) -> Vec<String>) {
+    let cwd = PathBuf::from(config.cwd).canonicalize().unwrap();
     let cwd2 = cwd.clone();
 
-    let ignores: Vec<_> = mem::take(&mut config.ignores)
-        .into_iter()
+    let paths_to_patterns = |paths: Vec<String>| -> Vec<glob::Pattern> {
+        paths
+            .into_iter()
+            .map(|path| path::absolute(cwd.join(path)).unwrap())
+            .filter_map(|path| {
+                glob::Pattern::new(path.to_string_lossy().as_ref()).map_or_else(
+                    |e| {
+                        eprintln!("invalid glob pattern: {e:?}");
+                        None
+                    },
+                    |pat| Some(pat),
+                )
+            })
+            .collect()
+    };
+
+    let raw_patterns: Vec<_> = config
+        .patterns
+        .iter()
         .map(|path| path::absolute(cwd.join(path)).unwrap())
-        .filter_map(|path| {
-            glob::Pattern::new(path.to_string_lossy().as_ref()).map_or_else(
-                |e| {
-                    eprintln!("invalid glob pattern: {e:?}");
-                    None
-                },
-                |pat| Some(pat),
-            )
-        })
         .collect();
+    let patterns = paths_to_patterns(config.patterns);
+    let ignores = paths_to_patterns(config.ignores);
 
-    let mut watcher = recommended_watcher(move |event: notify::Result<notify::Event>| {
-        let Ok(event) = event else {
-            return;
-        };
+    let events = config.events;
 
-        let event_type = match event.kind {
-            EventKind::Create(_) => EventType::Create,
-            EventKind::Modify(_) => EventType::Change,
-            EventKind::Remove(_) => EventType::Delete,
-            _ => return,
-        };
-
-        if !config.events.contains(&event_type) {
-            return;
+    (cwd, move |event, paths| {
+        if !events.contains(&event) {
+            return Vec::new();
         }
 
-        'outer: for path in event.paths {
-            let s = path.to_string_lossy();
-
-            for ignore in ignores.iter() {
-                if ignore.matches(s.as_ref()) {
-                    continue 'outer;
+        paths
+            .iter()
+            .filter_map(|path| {
+                if patterns.iter().all(|pattern| !pattern.matches_path(&path))
+                    && raw_patterns.iter().all(|raw| !path.starts_with(raw))
+                    || ignores.iter().any(|ignore| ignore.matches_path(&path))
+                {
+                    return None;
                 }
-            }
 
-            let Ok(path) = path.strip_prefix(&cwd2) else {
-                continue;
-            };
+                let Ok(path) = path.strip_prefix(&cwd2) else {
+                    return None;
+                };
 
-            sender
-                .send(Event {
-                    uid: config.uid,
-                    event: event_type,
-                    path: path.to_string_lossy().into_owned(),
-                })
-                .unwrap()
-        }
-    })?;
-
-    for path in paths {
-        let path = path::absolute(cwd.join(path)).unwrap();
-        match glob(path.to_string_lossy().as_ref()) {
-            Ok(paths) => {
-                for path in paths {
-                    match path {
-                        Ok(path) => {
-                            let s = path.to_string_lossy();
-                            if !s.contains("/../")
-                                && !s.contains("/./")
-                                && !s.ends_with("/..")
-                                && !s.ends_with("/.")
-                            {
-                                if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
-                                    eprintln!("failed to watch on path: {e:?}");
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("glob failed: {e:?}")
-                        }
-                    }
-                }
-            }
-            Err(e) => eprintln!("invalid glob pattern: {e:?}"),
-        }
-    }
-
-    Ok(watcher)
+                Some(path.to_string_lossy().into_owned())
+            })
+            .collect()
+    })
 }
 
 fn main() {
     #[cfg(target_os = "linux")]
     drop(thread::spawn(parent_process_watchdog));
 
+    let configs = Arc::new(Mutex::new(BTreeMap::new()));
+    let cconfigs = configs.clone();
     let (sender, receiver) = mpsc::channel();
-    drop(thread::spawn(|| event_listener(receiver)));
+    drop(thread::spawn(move || event_listener(cconfigs, receiver)));
 
-    let mut watchers = BTreeMap::new();
+    let mut watching_path = BTreeMap::new();
+    let mut watcher = recommended_watcher(move |event| sender.send(event).unwrap())
+        .expect("failed to create watcher");
 
     for input in io::stdin().lines() {
         let input = input.expect("failed to read from stdin");
         let request: Request = serde_json::from_str(&input).expect("failed to parse input");
 
         match request {
-            Request::Register(config) => match watchers.entry(config.uid) {
+            Request::Register(config) => match configs.lock().unwrap().entry(config.uid) {
                 Entry::Occupied(_) => eprintln!("watcher with ID {} already exists", config.uid),
-                Entry::Vacant(entry) => match new_watcher(config, sender.clone()) {
-                    Ok(watcher) => {
-                        entry.insert(watcher);
-                    }
-                    Err(e) => eprintln!("failed to create watcher: {e:?}"),
-                },
+                Entry::Vacant(entry) => {
+                    let (cwd, cb) = new_watcher(config);
+                    *watching_path.entry(cwd.clone()).or_insert_with(|| {
+                        if let Err(e) = watcher.watch(&cwd, RecursiveMode::Recursive) {
+                            eprintln!("failed to watch on path: {e:?}");
+                        }
+                        0usize
+                    }) += 1;
+                    entry.insert((cwd, cb));
+                }
             },
             Request::Unregister(uid) => {
-                if watchers.remove(&uid).is_none() {
+                if let Some((cwd, _)) = configs.lock().unwrap().remove(&uid) {
+                    let count = watching_path.get_mut(&cwd).unwrap();
+                    *count -= 1;
+                    if *count == 0 {
+                        watching_path.remove(&cwd);
+                    }
+                } else {
                     eprintln!("watcher with ID {uid} not found");
                 }
             }
