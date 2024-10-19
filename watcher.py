@@ -11,7 +11,6 @@ from LSP.plugin.core.transports import StopLoopError
 from LSP.plugin.core.transports import Transport
 from LSP.plugin.core.transports import TransportCallbacks
 from LSP.plugin.core.typing import Any, Callable, cast, Dict, IO, List, Optional, Tuple
-from lsp_utils import NodeRuntime
 from os import makedirs
 from os import path
 from os import remove
@@ -22,12 +21,7 @@ import sublime
 import subprocess
 import weakref
 
-
-PACKAGE_STORAGE = path.abspath(path.join(sublime.cache_path(), "..", "Package Storage"))
-VIRTUAL_CHOKIDAR_PATH = 'Packages/{}/{}/'.format(__package__, 'chokidar')
-CHOKIDAR_PACKAGE_STORAGE = path.join(PACKAGE_STORAGE, __package__)
-CHOKIDAR_INSTALATION_MARKER = path.join(CHOKIDAR_PACKAGE_STORAGE, '.installing')
-CHOKIDAR_CLI_PATH = path.join(CHOKIDAR_PACKAGE_STORAGE, 'chokidar', 'chokidar-cli', 'index.js')
+CHOKIDAR_CLI_PATH = path.join(path.dirname(__file__), 'chokidar')
 
 Uid = str
 
@@ -106,7 +100,6 @@ class FileWatcherChokidar(TransportCallbacks):
     def __init__(self) -> None:
         self._last_controller_id = 0
         self._handlers = {}  # type: Dict[str, Tuple[weakref.ref[FileWatcherProtocol], str]]
-        self._node_runtime = None  # type: Optional[NodeRuntime]
         self._transport = None  # type: Optional[Transport[str]]
         self._pending_events = {}  # type: Dict[Uid, List[FileWatcherEvent]]
 
@@ -172,48 +165,12 @@ class FileWatcherChokidar(TransportCallbacks):
 
     def _start_process(self) -> None:
         # log('Starting watcher process')
-        node_runtime = self._resolve_node_runtime()
-        node_bin = node_runtime.node_bin()
-        if not node_bin:
-            raise Exception('Node binary not resolved')
-        self._initialize_storage(node_runtime)
-        process = node_runtime.run_node(
+        process = subprocess.Popen(
             [CHOKIDAR_CLI_PATH], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if not process or not process.stdin or not process.stdout:
             raise RuntimeError('Failed initializing watcher process')
         self._transport = ProcessTransport(
             'lspwatcher', process, None, process.stdout, process.stdin, process.stderr, StringTransportHandler(), self)
-
-    def _resolve_node_runtime(self) -> NodeRuntime:
-        if self._node_runtime:
-            return self._node_runtime
-        self._node_runtime = NodeRuntime.get(__package__, PACKAGE_STORAGE, (12, 0, 0))
-        if not self._node_runtime:
-            raise Exception('{}: Failed to locate the Node.js Runtime'.format(__package__))
-        return self._node_runtime
-
-    def _initialize_storage(self, node_runtime: NodeRuntime) -> None:
-        destination_dir = path.join(CHOKIDAR_PACKAGE_STORAGE, 'chokidar')
-        installed = False
-        if path.isdir(path.join(destination_dir, 'node_modules')):
-            # Dependencies already installed. Check if the version has changed or last installation did not complete.
-            try:
-                src_hash = md5(ResourcePath(VIRTUAL_CHOKIDAR_PATH, 'package.json').read_bytes()).hexdigest()
-                with open(path.join(destination_dir, 'package.json'), 'rb') as file:
-                    dst_hash = md5(file.read()).hexdigest()
-                if src_hash == dst_hash and not path.isfile(CHOKIDAR_INSTALATION_MARKER):
-                    installed = True
-            except FileNotFoundError:
-                # Needs to be re-installed.
-                pass
-
-        if not installed:
-            with TemporaryInstallationMarker(CHOKIDAR_INSTALATION_MARKER):
-                if path.isdir(destination_dir):
-                    rmtree(destination_dir)
-                ResourcePath(VIRTUAL_CHOKIDAR_PATH).copytree(destination_dir, exist_ok=True)
-                with ActivityIndicator(sublime.active_window(), 'Installing file watcher'):
-                    node_runtime.run_install(destination_dir)
 
     def _end_process(self, exception: Optional[Exception] = None) -> None:
         if self._transport:
@@ -247,6 +204,7 @@ class FileWatcherChokidar(TransportCallbacks):
             self._pending_events[uid] = []
         _, root_path = self._handlers[uid]
         event_kind = cast(FileWatcherEventType, event_type)
+        log(str((event_kind, path.join(root_path, cwd_relative_path))))
         self._pending_events[uid].append((event_kind, path.join(root_path, cwd_relative_path)))
 
     def on_stderr_message(self, message: str) -> None:
