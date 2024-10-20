@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  - push
+  - pull_request
+  - workflow_dispatch
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os:
+          - windows-2022
+          - ubuntu-20.04
+          - macos-13
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Setup toolchain
+        uses: dtolnay/rust-toolchain@stable
+        if: ${{ startsWith(matrix.os, 'windows') }}
+      - name: Setup toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
+      - name: Setup toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+        if: ${{ startsWith(matrix.os, 'macos') }}
+      - name: Setup cross-compilation toolchain
+        run: |
+          sudo apt install -y gcc-aarch64-linux-gnu
+          echo -e '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
+      - name: Build for x86_64
+        run: cargo build --profile release
+      - name: Build for aarch64
+        run: cargo build --profile release --target aarch64-${{ startsWith(matrix.os, 'macos') && 'apple-darwin' || 'unknown-linux-gnu' }}
+        if: ${{ startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos') }}
+      - name: Create universal binary
+        run: |
+          lipo -create -output chokidar target/release/chokidar target/aarch64-apple-darwin/release/chokidar
+          mv chokidar target/release/chokidar
+        if: ${{ startsWith(matrix.os, 'macos') }}
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ startsWith(matrix.os, 'macos') && 'osx-universal' || (startsWith(matrix.os, 'ubuntu') && 'linux-x64' || 'windows-x64') }}
+          path: target/release/chokidar${{ startsWith(matrix.os, 'windows') && '.exe' || '' }}
+      - name: Upload aarch64 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: target/aarch64-unknown-linux-gnu/release/chokidar
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
