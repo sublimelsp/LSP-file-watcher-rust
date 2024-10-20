@@ -127,9 +127,53 @@ impl WatcherConfig {
     }
 }
 
+fn normalize_events(events: &mut Vec<notify::Event>) {
+    use notify::event::{CreateKind, EventAttributes, ModifyKind, RemoveKind, RenameMode};
+    use notify::{Event, EventKind};
+
+    let mut i = 0;
+    while i < events.len() {
+        let event = &mut events[i];
+        if let EventKind::Modify(ModifyKind::Name(rename)) = event.kind {
+            match rename {
+                RenameMode::From => {
+                    event.kind = EventKind::Remove(RemoveKind::Any);
+                }
+                RenameMode::To => {
+                    event.kind = EventKind::Create(CreateKind::Any);
+                    let paths = event.paths.clone();
+                    events.insert(
+                        i + 1,
+                        Event {
+                            kind: EventKind::Modify(ModifyKind::Any),
+                            paths,
+                            attrs: EventAttributes::new(),
+                        },
+                    )
+                }
+                RenameMode::Both => {
+                    assert_eq!(event.paths.len(), 2);
+                    event.kind = EventKind::Remove(RemoveKind::Any);
+                    let dest = event.paths.pop().unwrap();
+                    events.insert(
+                        i + 1,
+                        Event {
+                            kind: EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+                            paths: vec![dest],
+                            attrs: EventAttributes::new(),
+                        },
+                    )
+                }
+                _ => (),
+            }
+        }
+        i += 1;
+    }
+}
+
 fn event_handler(configs: Arc<Mutex<BTreeMap<usize, WatcherConfig>>>, events: DebounceEventResult) {
-    let events = match events {
-        Ok(events) => events,
+    let mut events = match events {
+        Ok(events) => events.into_iter().map(|event| event.event).collect(),
         Err(errors) => {
             for e in errors {
                 eprintln!("watcher error: {e:?}");
@@ -138,11 +182,11 @@ fn event_handler(configs: Arc<Mutex<BTreeMap<usize, WatcherConfig>>>, events: De
         }
     };
 
+    normalize_events(&mut events);
+
     let mut stdout = BufWriter::new(io::stdout().lock());
     let mut written = false;
     for event in events {
-        let event = event.event;
-
         let event_type = match event.kind {
             notify::EventKind::Create(_) => EventType::Create,
             notify::EventKind::Modify(_) => EventType::Change,
