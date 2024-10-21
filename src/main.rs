@@ -1,6 +1,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
 use std::io;
 use std::io::{BufWriter, Write};
 use std::path::{self, PathBuf};
@@ -155,7 +156,9 @@ struct WatcherConfig {
 
 impl WatcherConfig {
     fn from_request(req: RegisterRequest) -> WatcherConfig {
-        let cwd = PathBuf::from(req.cwd).canonicalize().unwrap();
+        let cwd = fs::canonicalize(req.cwd).unwrap();
+        #[cfg(windows)]
+        let cwd = PathBuf::from(cwd.to_string_lossy().strip_prefix("\\\\?\\").unwrap());
 
         let paths_to_patterns = |paths: Vec<String>| -> Vec<Pattern> {
             paths
