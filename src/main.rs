@@ -344,9 +344,11 @@ fn main() {
                     *count -= 1;
                     if *count == 0 {
                         watching_path.remove(&config.cwd);
-                        if !watching_path.keys().any(|path| {
-                            config.cwd.starts_with(path) || path.starts_with(&config.cwd)
-                        }) {
+                        if !cfg!(target_os = "linux")
+                            || !watching_path.keys().any(|path| {
+                                config.cwd.starts_with(path) || path.starts_with(&config.cwd)
+                            })
+                        {
                             watcher.watcher().unwatch(&config.cwd).unwrap();
                         }
                     }
