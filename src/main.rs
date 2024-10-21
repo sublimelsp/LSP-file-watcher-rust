@@ -5,7 +5,7 @@ use std::io;
 use std::io::{BufWriter, Write};
 use std::path::{self, PathBuf};
 use std::process::exit;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use glob::Pattern;
@@ -171,7 +171,7 @@ fn normalize_events(events: &mut Vec<notify::Event>) {
     }
 }
 
-fn event_handler(configs: Arc<Mutex<BTreeMap<usize, WatcherConfig>>>, events: DebounceEventResult) {
+fn event_handler(configs: &Mutex<BTreeMap<usize, WatcherConfig>>, events: DebounceEventResult) {
     let mut events = match events {
         Ok(events) => events.into_iter().map(|event| event.event).collect(),
         Err(errors) => {
@@ -237,12 +237,11 @@ fn main() {
     #[cfg(target_os = "linux")]
     drop(std::thread::spawn(parent_process_watchdog));
 
-    let configs = Arc::new(Mutex::new(BTreeMap::new()));
-    let configs_clone = configs.clone();
+    let configs = Box::leak(Box::new(Mutex::new(BTreeMap::new())));
     let mut watching_path = BTreeMap::new();
     let mut watcher =
-        notify_debouncer_full::new_debouncer(Duration::from_millis(400), None, move |events| {
-            event_handler(configs_clone.clone(), events)
+        notify_debouncer_full::new_debouncer(Duration::from_millis(400), None, |events| {
+            event_handler(configs, events)
         })
         .expect("failed to create watcher");
 
