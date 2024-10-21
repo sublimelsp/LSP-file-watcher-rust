@@ -318,11 +318,14 @@ fn main() {
 
     let configs = Box::leak(Box::new(Mutex::new(BTreeMap::new())));
     let mut watching_path = BTreeMap::new();
-    let mut watcher =
-        notify_debouncer_full::new_debouncer(Duration::from_millis(400), None, |events| {
-            event_handler(configs, events)
-        })
-        .expect("failed to create watcher");
+    let mut watcher = notify_debouncer_full::new_debouncer_opt(
+        Duration::from_millis(400),
+        None,
+        |events| event_handler(configs, events),
+        notify_debouncer_full::NoCache,
+        notify::Config::default(),
+    )
+    .expect("failed to create watcher");
 
     for input in io::stdin().lines() {
         let input = input.expect("failed to read from stdin");
