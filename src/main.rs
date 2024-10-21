@@ -160,18 +160,21 @@ impl WatcherConfig {
         #[cfg(windows)]
         let cwd = PathBuf::from(cwd.to_string_lossy().strip_prefix("\\\\?\\").unwrap());
 
-        let make_absolute_paths = |paths: &Vec<String>| {
-            paths.iter().map(|path| {
+        fn make_absolute_paths<'a>(
+            cwd: &'a PathBuf,
+            paths: &'a Vec<String>,
+        ) -> impl Iterator<Item = PathBuf> + use<'a> {
+            paths.iter().map(move |path| {
                 if cfg!(windows) {
                     path::absolute(cwd.join(path.replace("/", "\\"))).unwrap()
                 } else {
                     path::absolute(cwd.join(path)).unwrap()
                 }
             })
-        };
+        }
 
         let paths_to_patterns = |paths: &Vec<String>| {
-            make_absolute_paths(paths)
+            make_absolute_paths(&cwd, paths)
                 .filter_map(|path| {
                     Pattern::new(path.to_string_lossy().as_ref()).map_or_else(
                         |e| {
@@ -184,7 +187,7 @@ impl WatcherConfig {
                 .collect()
         };
 
-        let prefixes: Vec<_> = make_absolute_paths(&req.patterns).collect();
+        let prefixes: Vec<_> = make_absolute_paths(&cwd, &req.patterns).collect();
         let patterns = paths_to_patterns(&req.patterns);
         let ignores = paths_to_patterns(&req.ignores);
 
@@ -309,7 +312,10 @@ fn main() {
 
     let configs = Box::leak(Box::new(Mutex::new(BTreeMap::new())));
     let mut watching_path = BTreeMap::new();
-    let mut watcher = notify_debouncer_full::new_debouncer_opt(
+    let mut watcher: notify_debouncer_full::Debouncer<
+        notify::RecommendedWatcher,
+        notify_debouncer_full::NoCache,
+    > = notify_debouncer_full::new_debouncer_opt(
         Duration::from_millis(400),
         None,
         |events| event_handler(configs, events),
