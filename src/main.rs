@@ -43,6 +43,41 @@ fn parent_process_watchdog() {
     }
 }
 
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn parent_process_watchdog() {
+    fn parent_died() -> ! {
+        eprintln!("parent process died");
+        exit(1);
+    }
+
+    use windows::Wdk::System::Threading::{NtQueryInformationProcess, PROCESSINFOCLASS};
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, WaitForSingleObject, INFINITE, PROCESS_ACCESS_RIGHTS,
+    };
+
+    let mut info = [0usize; 6];
+    let mut r_len = 0;
+    assert!(unsafe {
+        NtQueryInformationProcess(
+            GetCurrentProcess(),
+            PROCESSINFOCLASS(0),
+            info.as_mut_ptr() as _,
+            48,
+            &raw mut r_len,
+        )
+    }
+    .is_ok());
+    assert_eq!(r_len, 48);
+
+    let ppid = info[5] as u32;
+    let Ok(pph) = (unsafe { OpenProcess(PROCESS_ACCESS_RIGHTS(0x00100000), false, ppid) }) else {
+        parent_died();
+    };
+
+    let _ = unsafe { WaitForSingleObject(pph, INFINITE) };
+    parent_died();
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum EventType {
@@ -234,7 +269,7 @@ fn event_handler(configs: &Mutex<BTreeMap<usize, WatcherConfig>>, events: Deboun
 }
 
 fn main() {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", all(windows, target_pointer_width = "64")))]
     drop(std::thread::spawn(parent_process_watchdog));
 
     let configs = Box::leak(Box::new(Mutex::new(BTreeMap::new())));
