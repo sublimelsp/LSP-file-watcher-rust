@@ -160,10 +160,18 @@ impl WatcherConfig {
         #[cfg(windows)]
         let cwd = PathBuf::from(cwd.to_string_lossy().strip_prefix("\\\\?\\").unwrap());
 
-        let paths_to_patterns = |paths: Vec<String>| -> Vec<Pattern> {
-            paths
-                .into_iter()
-                .map(|path| path::absolute(cwd.join(path)).unwrap())
+        let make_absolute_paths = |paths: &Vec<String>| {
+            paths.iter().map(|path| {
+                if cfg!(windows) {
+                    path::absolute(cwd.join(path.replace("/", "\\"))).unwrap()
+                } else {
+                    path::absolute(cwd.join(path)).unwrap()
+                }
+            })
+        };
+
+        let paths_to_patterns = |paths: &Vec<String>| {
+            make_absolute_paths(paths)
                 .filter_map(|path| {
                     Pattern::new(path.to_string_lossy().as_ref()).map_or_else(
                         |e| {
@@ -176,13 +184,9 @@ impl WatcherConfig {
                 .collect()
         };
 
-        let prefixes: Vec<_> = req
-            .patterns
-            .iter()
-            .map(|path| path::absolute(cwd.join(path)).unwrap())
-            .collect();
-        let patterns = paths_to_patterns(req.patterns);
-        let ignores = paths_to_patterns(req.ignores);
+        let prefixes: Vec<_> = make_absolute_paths(&req.patterns).collect();
+        let patterns = paths_to_patterns(&req.patterns);
+        let ignores = paths_to_patterns(&req.ignores);
 
         let events = req.events;
 
