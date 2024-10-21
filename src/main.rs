@@ -307,6 +307,9 @@ fn event_handler(configs: &Mutex<BTreeMap<usize, WatcherConfig>>, events: Deboun
 }
 
 fn main() {
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    compile_error!("unsupported platform");
+
     #[cfg(any(target_os = "linux", windows))]
     {
         enter_efficiency_mode();
