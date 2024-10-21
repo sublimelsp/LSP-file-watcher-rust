@@ -214,15 +214,6 @@ fn normalize_events(events: &mut Vec<notify::Event>) {
                 }
                 RenameMode::To => {
                     event.kind = EventKind::Create(CreateKind::Any);
-                    let paths = event.paths.clone();
-                    events.insert(
-                        i + 1,
-                        Event {
-                            kind: EventKind::Modify(ModifyKind::Any),
-                            paths,
-                            attrs: EventAttributes::new(),
-                        },
-                    )
                 }
                 RenameMode::Both => {
                     assert_eq!(event.paths.len(), 2);
