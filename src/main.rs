@@ -78,6 +78,31 @@ fn parent_process_watchdog() {
     parent_died();
 }
 
+#[cfg(windows)]
+fn enter_efficiency_mode() {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, ProcessPowerThrottling, SetProcessInformation,
+        PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
+    };
+
+    let info = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+            | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+        StateMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+            | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+    };
+    let _ = unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            &raw const info as _,
+            size_of::<PROCESS_POWER_THROTTLING_STATE>() as _,
+        )
+    };
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum EventType {
@@ -269,6 +294,9 @@ fn event_handler(configs: &Mutex<BTreeMap<usize, WatcherConfig>>, events: Deboun
 }
 
 fn main() {
+    #[cfg(windows)]
+    enter_efficiency_mode();
+
     #[cfg(any(target_os = "linux", all(windows, target_pointer_width = "64")))]
     drop(std::thread::spawn(parent_process_watchdog));
 
