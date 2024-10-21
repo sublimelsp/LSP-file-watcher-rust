@@ -266,11 +266,17 @@ fn event_handler(configs: &Mutex<BTreeMap<usize, WatcherConfig>>, events: Deboun
                 continue;
             }
 
+            let options = glob::MatchOptions {
+                case_sensitive: true,
+                require_literal_separator: true,
+                require_literal_leading_dot: true,
+            };
+
             for path in event.paths.iter() {
                 if config
                     .patterns
                     .iter()
-                    .all(|pattern| !pattern.matches_path(&path))
+                    .all(|pattern| !pattern.matches_path_with(&path, options))
                     && config
                         .prefixes
                         .iter()
@@ -278,7 +284,7 @@ fn event_handler(configs: &Mutex<BTreeMap<usize, WatcherConfig>>, events: Deboun
                     || config
                         .ignores
                         .iter()
-                        .any(|ignore| ignore.matches_path(&path))
+                        .any(|ignore| ignore.matches_path_with(&path, options))
                 {
                     continue;
                 }
