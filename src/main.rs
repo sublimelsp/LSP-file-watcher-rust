@@ -62,12 +62,12 @@ fn parent_process_watchdog() {
             GetCurrentProcess(),
             PROCESSINFOCLASS(0),
             info.as_mut_ptr() as _,
-            48,
+            (size_of::<usize>() * 6) as _,
             &raw mut r_len,
         )
     }
     .is_ok());
-    assert_eq!(r_len, 48);
+    assert_eq!(r_len as usize, size_of::<usize>() * 6);
 
     let ppid = info[5] as u32;
     let Ok(pph) = (unsafe { OpenProcess(PROCESS_ACCESS_RIGHTS(0x00100000), false, ppid) }) else {
