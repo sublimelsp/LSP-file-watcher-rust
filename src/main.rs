@@ -43,7 +43,7 @@ fn parent_process_watchdog() {
     }
 }
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(windows)]
 fn parent_process_watchdog() {
     fn parent_died() -> ! {
         eprintln!("parent process died");
@@ -76,6 +76,12 @@ fn parent_process_watchdog() {
 
     let _ = unsafe { WaitForSingleObject(pph, INFINITE) };
     parent_died();
+}
+
+#[cfg(target_os = "linux")]
+fn enter_efficiency_mode() {
+    let param = libc::sched_param { sched_priority: 0 };
+    unsafe { libc::sched_setscheduler(0, libc::SCHED_BATCH, &raw const param) };
 }
 
 #[cfg(windows)]
@@ -294,11 +300,11 @@ fn event_handler(configs: &Mutex<BTreeMap<usize, WatcherConfig>>, events: Deboun
 }
 
 fn main() {
-    #[cfg(windows)]
-    enter_efficiency_mode();
-
-    #[cfg(any(target_os = "linux", all(windows, target_pointer_width = "64")))]
-    drop(std::thread::spawn(parent_process_watchdog));
+    #[cfg(any(target_os = "linux", windows))]
+    {
+        enter_efficiency_mode();
+        drop(std::thread::spawn(parent_process_watchdog));
+    }
 
     let configs = Box::leak(Box::new(Mutex::new(BTreeMap::new())));
     let mut watching_path = BTreeMap::new();
