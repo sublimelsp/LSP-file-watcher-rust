@@ -76,6 +76,7 @@ jobs:
         uses: actions/download-artifact@v4
       - name: Commit repo
         run: |
+          find -name 'chokidar*' -exec chmod +x {} +
           git add --all
           git commit -m "Built artifacts for ${{ github.sha }}"
       - name: Fetch newest commit
