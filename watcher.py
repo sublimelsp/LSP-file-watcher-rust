@@ -21,7 +21,9 @@ import sublime
 import subprocess
 import weakref
 
-CHOKIDAR_CLI_PATH = path.join(path.dirname(__file__), 'chokidar')
+platform = sublime.platform()
+CHOKIDAR_CLI_PATH = path.join(path.dirname(__file__), '{}-{}'.format(platform,
+                              'universal2' if platform == 'osx' else sublime.arch()), 'chokidar')
 
 Uid = str
 
