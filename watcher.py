@@ -206,7 +206,7 @@ class FileWatcherChokidar(TransportCallbacks):
             self._pending_events[uid] = []
         _, root_path = self._handlers[uid]
         event_kind = cast(FileWatcherEventType, event_type)
-        log(str((event_kind, path.join(root_path, cwd_relative_path))))
+        # log(str((event_kind, path.join(root_path, cwd_relative_path))))
         self._pending_events[uid].append((event_kind, path.join(root_path, cwd_relative_path)))
 
     def on_stderr_message(self, message: str) -> None:
