@@ -81,8 +81,9 @@ fn parent_process_watchdog() {
 
 #[cfg(target_os = "linux")]
 fn enter_efficiency_mode() {
-    let param = libc::sched_param { sched_priority: 0 };
-    unsafe { libc::sched_setscheduler(0, libc::SCHED_BATCH, &raw const param) };
+    use rustix::process::{sched_setscheduler, SchedPolicy, SchedParam};
+
+    let _ = sched_setscheduler(None, SchedPolicy::Batch, &SchedParam::default());
 }
 
 #[cfg(windows)]

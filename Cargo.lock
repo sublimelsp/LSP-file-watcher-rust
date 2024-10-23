@@ -31,7 +31,6 @@ name = "chokidar"
 version = "0.1.0"
 dependencies = [
  "glob",
- "libc",
  "notify-debouncer-full",
  "rustix",
  "serde",
@@ -288,9 +287,8 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.38.37"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8acb788b847c24f28525660c4d7758620a7210875711f79e7f663cc152726811"
+version = "0.38.35"
+source = "git+https://github.com/ruihe774/rustix.git?branch=scheduler#4feb8cebea4374a73218879fea7472772187a7f8"
 dependencies = [
  "bitflags 2.6.0",
  "errno",
