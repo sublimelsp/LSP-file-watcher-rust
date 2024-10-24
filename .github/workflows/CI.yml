@@ -43,19 +43,19 @@ jobs:
         run: cargo build --profile release --target aarch64-${{ env.TRIPLE_SUFFIX }}
       - name: Create universal binary
         run: |
-          lipo -create -output chokidar target/release/chokidar target/aarch64-apple-darwin/release/chokidar
-          mv chokidar target/release/chokidar
+          lipo -create -output rust-watcher target/release/rust-watcher target/aarch64-apple-darwin/release/rust-watcher
+          mv rust-watcher target/release/rust-watcher
         if: ${{ env.OS_NAME == 'osx' }}
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.OS_NAME }}-${{ env.OS_NAME == 'osx' && 'universal2' || 'x64' }}
-          path: target/release/chokidar${{ env.OS_NAME == 'windows' && '.exe' || '' }}
+          path: target/release/rust-watcher${{ env.OS_NAME == 'windows' && '.exe' || '' }}
       - name: Upload aarch64 binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.OS_NAME }}-arm64
-          path: target/aarch64-${{ env.TRIPLE_SUFFIX }}/release/chokidar
+          path: target/aarch64-${{ env.TRIPLE_SUFFIX }}/release/rust-watcher
         if: ${{ env.OS_NAME == 'linux' }}
   push:
     name: Push artifacts
@@ -76,7 +76,7 @@ jobs:
         uses: actions/download-artifact@v4
       - name: Commit repo
         run: |
-          find -name 'chokidar*' -exec chmod +x {} +
+          find -name 'rust-watcher*' -exec chmod +x {} +
           git add --all
           git commit -m "Built artifacts for ${{ github.sha }}"
       - name: Fetch newest commit

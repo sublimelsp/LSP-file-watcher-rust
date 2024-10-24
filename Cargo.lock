@@ -27,18 +27,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
-name = "chokidar"
-version = "0.1.0"
-dependencies = [
- "glob",
- "notify-debouncer-full",
- "rustix",
- "serde",
- "serde_json",
- "windows",
-]
-
-[[package]]
 name = "crossbeam-channel"
 version = "0.5.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -283,6 +271,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b6dfecf2c74bce2466cabf93f6664d6998a69eb21e39f4207930065b27b771f"
 dependencies = [
  "bitflags 2.6.0",
+]
+
+[[package]]
+name = "rust-watcher"
+version = "0.1.0"
+dependencies = [
+ "glob",
+ "notify-debouncer-full",
+ "rustix",
+ "serde",
+ "serde_json",
+ "windows",
 ]
 
 [[package]]

@@ -17,8 +17,8 @@ import subprocess
 import weakref
 
 platform = sublime.platform()
-RUST_WATCHER_CLI_PATH = path.join(path.dirname(__file__), '{}-{}'.format(platform,
-                              'universal2' if platform == 'osx' else sublime.arch()), 'chokidar')
+binary_name = '{}-{}'.format(platform, 'universal2' if platform == 'osx' else sublime.arch())
+RUST_WATCHER_CLI_PATH = path.join(path.dirname(__file__), binary_name, 'rust-watcher')
 
 Uid = str
 
