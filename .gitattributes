@@ -1,0 +1,7 @@
+.github/ export-ignore
+.gitignore export-ignore
+pyrightconfig.json export-ignore
+tox.ini export-ignore
+Cargo.lock export-ignore
+Cargo.toml export-ignore
+src/ export-ignore
