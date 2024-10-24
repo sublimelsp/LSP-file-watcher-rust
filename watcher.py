@@ -1,4 +1,4 @@
-from hashlib import md5
+from __future__ import annotations
 from json import dumps
 from LSP.plugin import FileWatcher
 from LSP.plugin import FileWatcherEvent
@@ -11,18 +11,13 @@ from LSP.plugin.core.transports import StopLoopError
 from LSP.plugin.core.transports import Transport
 from LSP.plugin.core.transports import TransportCallbacks
 from LSP.plugin.core.typing import Any, Callable, cast, Dict, IO, List, Optional, Tuple
-from os import makedirs
 from os import path
-from os import remove
-from shutil import rmtree
-from sublime_lib import ActivityIndicator
-from sublime_lib import ResourcePath
 import sublime
 import subprocess
 import weakref
 
 platform = sublime.platform()
-CHOKIDAR_CLI_PATH = path.join(path.dirname(__file__), '{}-{}'.format(platform,
+RUST_WATCHER_CLI_PATH = path.join(path.dirname(__file__), '{}-{}'.format(platform,
                               'universal2' if platform == 'osx' else sublime.arch()), 'chokidar')
 
 Uid = str
@@ -30,34 +25,6 @@ Uid = str
 
 def log(message: str) -> None:
     print('{}: {}'.format(__package__, message))
-
-
-class TemporaryInstallationMarker:
-    """
-    Creates a temporary file for the duration of the context.
-    The temporary file is not removed if an exception triggeres within the context.
-
-    Usage:
-
-    ```
-    with TemporaryInstallationMarker('/foo/file'):
-        ...
-    ```
-    """
-
-    def __init__(self, marker_path: str) -> None:
-        self._marker_path = marker_path
-
-    def __enter__(self) -> 'TemporaryInstallationMarker':
-        makedirs(path.dirname(self._marker_path), exist_ok=True)
-        open(self._marker_path, 'a').close()
-        return self
-
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        if exc_type:
-            # Don't remove the marker on exception.
-            return
-        remove(self._marker_path)
 
 
 class StringTransportHandler(AbstractProcessor[str]):
@@ -97,13 +64,13 @@ class FileWatcherController(FileWatcher):
         self._on_destroy()
 
 
-class FileWatcherChokidar(TransportCallbacks):
+class RustFileWatcher(TransportCallbacks):
 
     def __init__(self) -> None:
         self._last_controller_id = 0
-        self._handlers = {}  # type: Dict[str, Tuple[weakref.ref[FileWatcherProtocol], str]]
-        self._transport = None  # type: Optional[Transport[str]]
-        self._pending_events = {}  # type: Dict[Uid, List[FileWatcherEvent]]
+        self._handlers: Dict[str, Tuple[weakref.ref[FileWatcherProtocol], str]] = {}
+        self._transport: Optional[Transport[str]] = None
+        self._pending_events: Dict[Uid, List[FileWatcherEvent]] = {}
 
     def register_watcher(
         self,
@@ -168,7 +135,7 @@ class FileWatcherChokidar(TransportCallbacks):
     def _start_process(self) -> None:
         # log('Starting watcher process')
         process = subprocess.Popen(
-            [CHOKIDAR_CLI_PATH], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            [RUST_WATCHER_CLI_PATH], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if not process or not process.stdin or not process.stdout:
             raise RuntimeError('Failed initializing watcher process')
         self._transport = ProcessTransport(
@@ -183,9 +150,9 @@ class FileWatcherChokidar(TransportCallbacks):
     # --- TransportCallbacks -------------------------------------------------------------------------------------------
 
     def on_payload(self, payload: str) -> None:
-        # Chokidar debounces the events and sends them in batches but Transport notifies us for each new line
+        # Watcher debounces the events and sends them in batches but Transport notifies us for each new line
         # separately so we don't get the benefit of batching by default. To optimize the `on_file_event_async`
-        # notifications we'll batch the events on our side and only notify when chokidar reports end of the batch
+        # notifications we'll batch the events on our side and only notify when watcher reports end of the batch
         # using the `<flush>` line.
         if payload == '<flush>':
             for uid, events in self._pending_events.items():
@@ -216,6 +183,6 @@ class FileWatcherChokidar(TransportCallbacks):
         self._end_process(exception)
 
 
-file_watcher = FileWatcherChokidar()
+file_watcher = RustFileWatcher()
 
 register_file_watcher_implementation(FileWatcherController)
