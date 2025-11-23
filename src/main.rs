@@ -194,9 +194,7 @@ impl WatcherConfig {
                 .fold(GlobSetBuilder::new(), |mut set, glob| {
                     set.add(glob);
                     set
-                })
-                .build()
-                .unwrap()
+                }).build().unwrap()
         };
 
         let prefixes: Vec<_> = make_absolute_paths(&root, &reg.patterns).collect();
@@ -217,12 +215,43 @@ impl WatcherConfig {
     }
 }
 
-fn handle_event(event: notify::Result<notify::Event>, config: &WatcherConfig) -> Vec<Report> {
-    use notify::event::{ModifyKind, RenameMode};
-    use notify::EventKind;
+fn normalize_events(events: &mut Vec<notify::Event>) {
+    use notify::event::{CreateKind, EventAttributes, ModifyKind, RemoveKind, RenameMode};
+    use notify::{Event, EventKind};
 
-    let timestamp = Instant::now();
-    let mut r = Vec::with_capacity(2);
+    let mut i = 0;
+    while i < events.len() {
+        let event = &mut events[i];
+        if let EventKind::Modify(ModifyKind::Name(rename)) = event.kind {
+            match rename {
+                RenameMode::From => {
+                    event.kind = EventKind::Remove(RemoveKind::Any);
+                }
+                RenameMode::To => {
+                    event.kind = EventKind::Create(CreateKind::Any);
+                }
+                RenameMode::Both => {
+                    assert_eq!(event.paths.len(), 2);
+                    event.kind = EventKind::Remove(RemoveKind::Any);
+                    let dest = event.paths.pop().unwrap();
+                    events.insert(
+                        i + 1,
+                        Event {
+                            kind: EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+                            paths: vec![dest],
+                            attrs: EventAttributes::new(),
+                        },
+                    )
+                }
+                _ => (),
+            }
+        }
+        i += 1;
+    }
+}
+
+fn handle_event(event: notify::Result<notify::Event>, config: &WatcherConfig) -> Vec<Report> {
+    let mut r = Vec::new();
 
     let event = match event {
         Ok(event) => event,
@@ -231,55 +260,38 @@ fn handle_event(event: notify::Result<notify::Event>, config: &WatcherConfig) ->
             return r;
         }
     };
+    let mut events = vec![event];
 
-    let mut filter_and_push = |event_type, path: PathBuf| {
+    normalize_events(&mut events);
+
+    for event in events {
+        let event_type = match event.kind {
+            notify::EventKind::Create(_) => EventType::Create,
+            notify::EventKind::Modify(_) => EventType::Change,
+            notify::EventKind::Remove(_) => EventType::Delete,
+            _ => continue,
+        };
+
         if !config.events.contains(&event_type) {
-            return;
+            continue;
         }
 
-        if (config.patterns.is_match(&path)
-            || config
-                .prefixes
-                .iter()
-                .any(|prefix| path.starts_with(prefix)))
-            && !config.ignores.is_match(&path)
-        {
-            r.push(Report {
-                uid: config.uid,
-                event: event_type,
-                path,
-                timestamp,
-            });
-        }
-    };
-
-    debug_assert!((1..=2).contains(&event.paths.len()));
-    if event.paths.is_empty() {
-        return r;
-    }
-    let mut paths = event.paths.into_iter();
-    match event.kind {
-        EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
-            filter_and_push(EventType::Create, paths.next().unwrap());
-        }
-        EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
-            filter_and_push(EventType::Delete, paths.next().unwrap());
-        }
-        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
-            filter_and_push(EventType::Delete, paths.next().unwrap());
-            filter_and_push(EventType::Create, paths.next().unwrap());
-        }
-        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_)) => {
-            filter_and_push(EventType::Change, paths.next().unwrap());
-        }
-        EventKind::Modify(ModifyKind::Name(_)) => {
-            // dirty check for macOS
-            let path = paths.next().unwrap();
-            if !path.exists() {
-                filter_and_push(EventType::Delete, path);
+        for path in event.paths.into_iter() {
+            if (config.patterns.is_match(&path)
+                || config
+                    .prefixes
+                    .iter()
+                    .any(|prefix| path.starts_with(prefix)))
+                && !config.ignores.is_match(&path)
+            {
+                r.push(Report {
+                    uid: config.uid,
+                    event: event_type,
+                    path,
+                    timestamp: Instant::now(),
+                });
             }
         }
-        _ => (),
     }
 
     return r;
@@ -342,8 +354,6 @@ fn handle_reports(queue: &'static Mutex<Vec<Report>>) -> ! {
                         (EventType::Delete, EventType::Create) => Some(EventType::Change),
                         (EventType::Create, EventType::Delete) => None,
                         (EventType::Create, EventType::Change) => Some(EventType::Create),
-                        // basically we cannot change a file after it has been deleted
-                        (EventType::Delete, EventType::Change) => Some(EventType::Delete),
                         _ => Some(event),
                     };
                     if let Some(new_event) = new_event {
