@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 globset = "0.4"
-notify = "8"
+notify = { version = "8", features = ["macos_kqueue"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
