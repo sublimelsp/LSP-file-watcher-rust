@@ -1,7 +1,9 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{self, BufWriter, Write};
+use std::fs;
+use std::io::{self, BufWriter, Write as _};
 use std::mem;
 use std::path::{self, Path, PathBuf};
 use std::process::exit;
@@ -10,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
-use notify::Watcher;
+use notify::Watcher as _;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
@@ -39,7 +41,7 @@ fn parent_process_watchdog() -> ! {
     loop {
         match poll(&mut fds, -1) {
             Ok(_) => parent_died(),
-            Err(Errno::INTR) => continue,
+            Err(Errno::INTR) => {}
             Err(e) => panic!("poll failed: {e:?}"),
         }
     }
@@ -121,9 +123,9 @@ enum EventType {
 impl fmt::Display for EventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EventType::Create => "create",
-            EventType::Change => "change",
-            EventType::Delete => "delete",
+            Self::Create => "create",
+            Self::Change => "change",
+            Self::Delete => "delete",
         }
         .fmt(f)
     }
@@ -203,12 +205,10 @@ impl PatternMatcher {
             let abs = normalize_pattern(cwd, pat);
             if is_glob_str(pat) {
                 glob_patterns.push(abs.to_string_lossy().into_owned());
+            } else if abs.is_dir() {
+                literal_dirs.push(abs);
             } else {
-                if abs.is_dir() {
-                    literal_dirs.push(abs);
-                } else {
-                    literal_files.insert(abs);
-                }
+                literal_files.insert(abs);
             }
         }
 
@@ -220,11 +220,7 @@ impl PatternMatcher {
             } else {
                 // literal ignore: also add path/** to exclude children
                 ignore_patterns.push(abs_str.clone());
-                ignore_patterns.push(format!(
-                    "{}{sep}**",
-                    abs_str,
-                    sep = std::path::MAIN_SEPARATOR
-                ));
+                ignore_patterns.push(format!("{}{sep}**", abs_str, sep = path::MAIN_SEPARATOR));
             }
         }
 
@@ -328,15 +324,15 @@ impl WatcherState {
                             .insert(name.to_os_string());
                     }
                 }
-            } else if file_type.is_file() || file_type.is_symlink() {
-                if self.matcher.is_emittable(&path) {
-                    self.tracked_files.insert(path.clone());
-                    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
-                        self.tracked_dirs
-                            .entry(parent.to_path_buf())
-                            .or_default()
-                            .insert(name.to_os_string());
-                    }
+            } else if (file_type.is_file() || file_type.is_symlink())
+                && self.matcher.is_emittable(&path)
+            {
+                self.tracked_files.insert(path.clone());
+                if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+                    self.tracked_dirs
+                        .entry(parent.to_path_buf())
+                        .or_default()
+                        .insert(name.to_os_string());
                 }
             }
         }
@@ -347,9 +343,9 @@ impl WatcherState {
             return;
         }
 
-        match std::fs::symlink_metadata(path) {
+        match fs::symlink_metadata(path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                self.handle_deletion(path.to_path_buf(), queue);
+                self.handle_deletion(path.to_path_buf());
             }
             Err(e) => {
                 eprintln!("watcher: stat error for {}: {e}", path.display());
@@ -364,7 +360,7 @@ impl WatcherState {
         }
     }
 
-    fn handle_deletion(&mut self, path: PathBuf, queue: &mut Vec<Report>) {
+    fn handle_deletion(&mut self, path: PathBuf) {
         let parent = match path.parent() {
             Some(p) => p.to_path_buf(),
             None => return,
@@ -400,7 +396,7 @@ impl WatcherState {
                 .unwrap_or_default();
             self.tracked_dirs.remove(&path);
             for child in children {
-                self.handle_deletion(path.join(&child), queue);
+                self.handle_deletion(path.join(&child));
             }
         }
 
@@ -431,10 +427,10 @@ impl WatcherState {
         }
 
         // Snapshot what's currently on disk (filtered).
-        let current: HashSet<OsString> = match std::fs::read_dir(&path) {
+        let current: HashSet<OsString> = match fs::read_dir(&path) {
             Err(_) => return,
             Ok(rd) => rd
-                .filter_map(|e| e.ok())
+                .filter_map(Result::ok)
                 .filter_map(|entry| {
                     let cp = entry.path();
                     let ft = entry.file_type().ok()?;
@@ -445,11 +441,7 @@ impl WatcherState {
                             Some(entry.file_name())
                         }
                     } else {
-                        if self.matcher.is_emittable(&cp) {
-                            Some(entry.file_name())
-                        } else {
-                            None
-                        }
+                        self.matcher.is_emittable(&cp).then(|| entry.file_name())
                     }
                 })
                 .collect(),
@@ -467,7 +459,7 @@ impl WatcherState {
             self.dispatch(&path.join(&name), queue);
         }
         for name in gone_entries {
-            self.handle_deletion(path.join(&name), queue);
+            self.handle_deletion(path.join(&name));
         }
     }
 
@@ -552,10 +544,7 @@ impl WatcherState {
             if now >= deadline {
                 to_flush.push((path.clone(), orig));
             } else {
-                earliest = Some(match earliest {
-                    None => deadline,
-                    Some(e) => e.min(deadline),
-                });
+                earliest = Some(earliest.map_or(deadline, |e| e.min(deadline)));
             }
         }
 
@@ -574,7 +563,7 @@ impl WatcherState {
 }
 
 type Queue = &'static Mutex<Vec<Report>>;
-type States = &'static Mutex<BTreeMap<usize, Arc<Mutex<WatcherState>>>>;
+type States = &'static Mutex<HashMap<usize, Arc<Mutex<WatcherState>>>>;
 
 fn create_watcher(
     reg: Register,
@@ -643,10 +632,7 @@ fn handle_reports(queue: Queue, states: States) -> ! {
                 for state_arc in map.values() {
                     if let Ok(mut s) = state_arc.try_lock() {
                         if let Some(ed) = s.flush_pending(now, &mut flush_buf) {
-                            earliest_deadline = Some(match earliest_deadline {
-                                None => ed,
-                                Some(e) => e.min(ed),
-                            });
+                            earliest_deadline = Some(earliest_deadline.map_or(ed, |e| e.min(ed)));
                         }
                     }
                 }
@@ -678,16 +664,16 @@ fn handle_reports(queue: Queue, states: States) -> ! {
         };
 
         // Collapse overlapping events for the same (uid, path), preserving order.
-        let mut path_states: BTreeMap<(usize, PathBuf), (usize, EventType)> = BTreeMap::new();
+        let mut path_states: HashMap<(usize, PathBuf), (usize, EventType)> = HashMap::new();
         for (i, report) in q.into_iter().enumerate() {
             let Report {
                 uid, event, path, ..
             } = report;
             match path_states.entry((uid, path)) {
-                std::collections::btree_map::Entry::Vacant(e) => {
+                Entry::Vacant(e) => {
                     e.insert((i, event));
                 }
-                std::collections::btree_map::Entry::Occupied(mut e) => {
+                Entry::Occupied(mut e) => {
                     let stored = &mut e.get_mut().1;
                     let merged = match (*stored, event) {
                         (EventType::Delete, EventType::Create) => Some(EventType::Change),
@@ -730,10 +716,10 @@ fn main() {
     }
 
     let queue: Queue = Box::leak(Box::new(Mutex::new(Vec::new())));
-    let states: States = Box::leak(Box::new(Mutex::new(BTreeMap::new())));
+    let states: States = Box::leak(Box::new(Mutex::new(HashMap::new())));
     drop(thread::spawn(move || handle_reports(queue, states)));
 
-    let mut watchers: BTreeMap<usize, notify::RecommendedWatcher> = BTreeMap::new();
+    let mut watchers: HashMap<usize, notify::RecommendedWatcher> = HashMap::new();
 
     for line in io::stdin().lines() {
         let line = line.expect("failed to read from stdin");
@@ -743,19 +729,17 @@ fn main() {
             Request::Register(reg) => {
                 let uid = reg.uid;
                 match watchers.entry(uid) {
-                    std::collections::btree_map::Entry::Occupied(_) => {
+                    Entry::Occupied(_) => {
                         eprintln!("watcher with ID {uid} already exists");
                     }
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        match create_watcher(reg, queue, states) {
-                            Ok(w) => {
-                                entry.insert(w);
-                            }
-                            Err(e) => {
-                                eprintln!("failed to watch on path: {e:?}");
-                            }
+                    Entry::Vacant(entry) => match create_watcher(reg, queue, states) {
+                        Ok(w) => {
+                            entry.insert(w);
                         }
-                    }
+                        Err(e) => {
+                            eprintln!("failed to watch on path: {e:?}");
+                        }
+                    },
                 }
             }
             Request::Unregister(uid) => {
