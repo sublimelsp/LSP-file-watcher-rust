@@ -28,6 +28,12 @@ jobs:
           echo OS_NAME=${{ startsWith(matrix.os, 'windows') && 'windows' || (startsWith(matrix.os, 'macos') && 'osx' || 'linux') }} >> $GITHUB_ENV
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       - name: Setup toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -39,6 +45,8 @@ jobs:
         if: ${{ env.OS_NAME == 'linux' }}
       - name: Build for x86_64
         run: cargo build --profile release
+      - name: Run parity check
+        run: ./scripts/parity_check.sh --no-build
       - name: Build for aarch64
         run: cargo build --profile release --target aarch64-${{ env.TRIPLE_SUFFIX }}
       - name: Create universal binary
