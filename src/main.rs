@@ -7,7 +7,7 @@ use std::io::{self, BufWriter, Write as _};
 use std::mem;
 use std::path::{self, Path, PathBuf};
 use std::process::exit;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -338,21 +338,27 @@ impl WatcherState {
         }
     }
 
-    fn dispatch(&mut self, path: &Path, queue: &mut Vec<Report>) {
+    fn dispatch(
+        &mut self,
+        path: &Path,
+        queue: &mut Vec<Report>,
+        acquired: &mut Vec<PathBuf>,
+        released: &mut Vec<PathBuf>,
+    ) {
         if !path.starts_with(&self.cwd) {
             return;
         }
 
         match fs::symlink_metadata(path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                self.handle_deletion(path.to_path_buf());
+                self.handle_deletion(path.to_path_buf(), released);
             }
             Err(e) => {
                 eprintln!("watcher: stat error for {}: {e}", path.display());
             }
             Ok(meta) => {
                 if meta.is_dir() {
-                    self.handle_directory(path.to_path_buf(), queue);
+                    self.handle_directory(path.to_path_buf(), queue, acquired, released);
                 } else {
                     self.handle_file(path.to_path_buf(), queue);
                 }
@@ -360,7 +366,7 @@ impl WatcherState {
         }
     }
 
-    fn handle_deletion(&mut self, path: PathBuf) {
+    fn handle_deletion(&mut self, path: PathBuf, released: &mut Vec<PathBuf>) {
         let parent = match path.parent() {
             Some(p) => p.to_path_buf(),
             None => return,
@@ -395,8 +401,9 @@ impl WatcherState {
                 .map(|s| s.iter().cloned().collect())
                 .unwrap_or_default();
             self.tracked_dirs.remove(&path);
+            released.push(path.clone());
             for child in children {
-                self.handle_deletion(path.join(&child));
+                self.handle_deletion(path.join(&child), released);
             }
         }
 
@@ -414,8 +421,17 @@ impl WatcherState {
         }
     }
 
-    fn handle_directory(&mut self, path: PathBuf, queue: &mut Vec<Report>) {
-        // Ensure the directory itself is tracked.
+    fn handle_directory(
+        &mut self,
+        path: PathBuf,
+        queue: &mut Vec<Report>,
+        acquired: &mut Vec<PathBuf>,
+        released: &mut Vec<PathBuf>,
+    ) {
+        // Track new directories so the hub can install a watch on them.
+        if !self.tracked_dirs.contains_key(&path) {
+            acquired.push(path.clone());
+        }
         self.tracked_dirs.entry(path.clone()).or_default();
         if path != self.cwd {
             if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
@@ -456,10 +472,10 @@ impl WatcherState {
         let gone_entries: Vec<OsString> = tracked.difference(&current).cloned().collect();
 
         for name in new_entries {
-            self.dispatch(&path.join(&name), queue);
+            self.dispatch(&path.join(&name), queue, acquired, released);
         }
         for name in gone_entries {
-            self.handle_deletion(path.join(&name));
+            self.handle_deletion(path.join(&name), released);
         }
     }
 
@@ -562,56 +578,96 @@ impl WatcherState {
     }
 }
 
+// Owns the single RecommendedWatcher and refcounts OS-level directory watches.
+struct Hub {
+    watcher: notify::RecommendedWatcher,
+    dir_refs: HashMap<PathBuf, usize>,
+}
+
+impl Hub {
+    fn acquire(&mut self, dir: &Path) {
+        let n = self.dir_refs.entry(dir.to_path_buf()).or_insert(0);
+        *n += 1;
+        if *n == 1 {
+            if let Err(e) = self.watcher.watch(dir, notify::RecursiveMode::NonRecursive) {
+                eprintln!("watch({}) failed: {e:?}", dir.display());
+            }
+        }
+    }
+
+    fn release(&mut self, dir: &Path) {
+        if let Some(n) = self.dir_refs.get_mut(dir) {
+            *n -= 1;
+            if *n == 0 {
+                self.dir_refs.remove(dir);
+                let _ = self.watcher.unwatch(dir);
+            }
+        }
+    }
+}
+
 type Queue = &'static Mutex<Vec<Report>>;
 type States = &'static Mutex<HashMap<usize, Arc<Mutex<WatcherState>>>>;
+type HubHandle = &'static Mutex<Hub>;
 
-fn create_watcher(
-    reg: Register,
-    queue: Queue,
-    states: States,
-) -> notify::Result<notify::RecommendedWatcher> {
+fn register_watcher(reg: Register, hub: HubHandle, states: States) {
     let uid = reg.uid;
     let cwd = path::absolute(&reg.cwd).unwrap_or_else(|_| PathBuf::from(&reg.cwd));
     let matcher = PatternMatcher::new(&cwd, &reg.patterns, &reg.ignores);
 
-    let state = Arc::new(Mutex::new(WatcherState::new(
-        uid,
-        cwd.clone(),
-        reg.events,
-        matcher,
-    )));
+    let mut state = WatcherState::new(uid, cwd, reg.events, matcher);
+    state.initial_scan();
 
+    // Acquire one non-recursive OS watch per directory discovered in the scan.
     {
-        let mut s = state.lock().unwrap();
-        s.initial_scan();
+        let dirs: Vec<PathBuf> = state.tracked_dirs.keys().cloned().collect();
+        let mut h = hub.lock().unwrap();
+        for dir in dirs {
+            h.acquire(&dir);
+        }
     }
 
-    let state_for_cb = Arc::clone(&state);
-    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-        let event = match result {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("watcher error: {e:?}");
-                return;
-            }
+    let state = Arc::new(Mutex::new(state));
+    states.lock().unwrap().insert(uid, state);
+}
+
+fn dispatch_worker(
+    rx: mpsc::Receiver<notify::Event>,
+    hub: HubHandle,
+    queue: Queue,
+    states: States,
+) {
+    while let Ok(event) = rx.recv() {
+        let state_arcs: Vec<Arc<Mutex<WatcherState>>> = {
+            let map = states.lock().unwrap();
+            map.values().cloned().collect()
         };
 
-        let mut local = Vec::new();
-        {
-            let mut s = state_for_cb.lock().unwrap();
-            for path in event.paths {
-                s.dispatch(&path, &mut local);
+        let mut reports: Vec<Report> = Vec::new();
+        let mut acquired: Vec<PathBuf> = Vec::new();
+        let mut released: Vec<PathBuf> = Vec::new();
+
+        for state_arc in state_arcs {
+            let mut s = state_arc.lock().unwrap();
+            for path in &event.paths {
+                s.dispatch(path, &mut reports, &mut acquired, &mut released);
             }
         }
 
-        if !local.is_empty() {
-            queue.lock().unwrap().append(&mut local);
+        if !acquired.is_empty() || !released.is_empty() {
+            let mut h = hub.lock().unwrap();
+            for dir in acquired {
+                h.acquire(&dir);
+            }
+            for dir in released {
+                h.release(&dir);
+            }
         }
-    })?;
 
-    watcher.watch(&cwd, notify::RecursiveMode::Recursive)?;
-    states.lock().unwrap().insert(uid, state);
-    Ok(watcher)
+        if !reports.is_empty() {
+            queue.lock().unwrap().append(&mut reports);
+        }
+    }
 }
 
 fn handle_reports(queue: Queue, states: States) -> ! {
@@ -717,9 +773,26 @@ fn main() {
 
     let queue: Queue = Box::leak(Box::new(Mutex::new(Vec::new())));
     let states: States = Box::leak(Box::new(Mutex::new(HashMap::new())));
-    drop(thread::spawn(move || handle_reports(queue, states)));
 
-    let mut watchers: HashMap<usize, notify::RecommendedWatcher> = HashMap::new();
+    let (event_tx, event_rx) = mpsc::channel::<notify::Event>();
+    let watcher =
+        notify::recommended_watcher(move |result: notify::Result<notify::Event>| match result {
+            Ok(e) => {
+                let _ = event_tx.send(e);
+            }
+            Err(e) => eprintln!("watcher error: {e:?}"),
+        })
+        .expect("failed to create watcher");
+
+    let hub: HubHandle = Box::leak(Box::new(Mutex::new(Hub {
+        watcher,
+        dir_refs: HashMap::new(),
+    })));
+
+    drop(thread::spawn(move || {
+        dispatch_worker(event_rx, hub, queue, states)
+    }));
+    drop(thread::spawn(move || handle_reports(queue, states)));
 
     for line in io::stdin().lines() {
         let line = line.expect("failed to read from stdin");
@@ -728,27 +801,27 @@ fn main() {
         match request {
             Request::Register(reg) => {
                 let uid = reg.uid;
-                match watchers.entry(uid) {
-                    Entry::Occupied(_) => {
-                        eprintln!("watcher with ID {uid} already exists");
-                    }
-                    Entry::Vacant(entry) => match create_watcher(reg, queue, states) {
-                        Ok(w) => {
-                            entry.insert(w);
-                        }
-                        Err(e) => {
-                            eprintln!("failed to watch on path: {e:?}");
-                        }
-                    },
+                let already = states.lock().unwrap().contains_key(&uid);
+                if already {
+                    eprintln!("watcher with ID {uid} already exists");
+                } else {
+                    register_watcher(reg, hub, states);
                 }
             }
             Request::Unregister(uid) => {
-                // Drop the notify watcher first (stops new event callbacks).
-                if watchers.remove(&uid).is_none() {
-                    eprintln!("watcher with ID {uid} not found");
+                let state = states.lock().unwrap().remove(&uid);
+                match state {
+                    None => eprintln!("watcher with ID {uid} not found"),
+                    Some(arc) => {
+                        // Collect dirs while we still have the Arc.
+                        let dirs: Vec<PathBuf> =
+                            arc.lock().unwrap().tracked_dirs.keys().cloned().collect();
+                        let mut h = hub.lock().unwrap();
+                        for dir in dirs {
+                            h.release(&dir);
+                        }
+                    }
                 }
-                // Then remove the state (any in-flight callback still holds its Arc).
-                states.lock().unwrap().remove(&uid);
             }
         }
     }
