@@ -158,6 +158,25 @@ fn is_glob_str(s: &str) -> bool {
     s.contains('*') || s.contains('?') || s.contains('{') || s.contains('[') || s.starts_with('!')
 }
 
+#[derive(Copy, Clone)]
+enum PathKind {
+    Missing,
+    Dir,
+    File,
+}
+
+fn classify(path: &Path) -> Option<PathKind> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(PathKind::Missing),
+        Err(e) => {
+            eprintln!("watcher: stat error for {}: {e}", path.display());
+            None
+        }
+        Ok(m) if m.is_dir() => Some(PathKind::Dir),
+        Ok(_) => Some(PathKind::File),
+    }
+}
+
 fn normalize_pattern(cwd: &Path, pat: &str) -> PathBuf {
     #[cfg(windows)]
     let pat = pat.replace('/', "\\");
@@ -242,19 +261,22 @@ impl PatternMatcher {
         if self.ignore_set.is_match(path) {
             return true;
         }
-        // Editor temp-file filter (mirrors chokidar's atomic DOT_RE):
-        //   vim swap:    .*.swp / .*.swx / .*.swpx
-        //   generic bak: *~
-        //   sublime tmp: .subl*.tmp
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.ends_with('~') {
+        // Mirror chokidar's DOT_RE: /\..*\.(sw[px])$|~$|\.subl.*\.tmp/
+        // tested against the full path string.
+        if let Some(s) = path.to_str() {
+            if s.ends_with('~') {
                 return true;
             }
-            if name.starts_with('.') {
-                if name.ends_with(".swp") || name.ends_with(".swx") || name.ends_with(".swpx") {
-                    return true;
+            for suffix in [".swp", ".swx", ".swpx"] {
+                if let Some(stripped) = s.strip_suffix(suffix) {
+                    // \..*\.swp$ requires a dot before the trailing suffix.
+                    if stripped.contains('.') {
+                        return true;
+                    }
                 }
-                if name.starts_with(".subl") && name.ends_with(".tmp") {
+            }
+            if let Some(idx) = s.find(".subl") {
+                if s[idx + ".subl".len()..].contains(".tmp") {
                     return true;
                 }
             }
@@ -341,6 +363,7 @@ impl WatcherState {
     fn dispatch(
         &mut self,
         path: &Path,
+        kind: PathKind,
         queue: &mut Vec<Report>,
         acquired: &mut Vec<PathBuf>,
         released: &mut Vec<PathBuf>,
@@ -348,21 +371,10 @@ impl WatcherState {
         if !path.starts_with(&self.cwd) {
             return;
         }
-
-        match fs::symlink_metadata(path) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                self.handle_deletion(path.to_path_buf(), released);
-            }
-            Err(e) => {
-                eprintln!("watcher: stat error for {}: {e}", path.display());
-            }
-            Ok(meta) => {
-                if meta.is_dir() {
-                    self.handle_directory(path.to_path_buf(), queue, acquired, released);
-                } else {
-                    self.handle_file(path.to_path_buf(), queue);
-                }
-            }
+        match kind {
+            PathKind::Missing => self.handle_deletion(path.to_path_buf(), released),
+            PathKind::Dir => self.handle_directory(path.to_path_buf(), queue, acquired, released),
+            PathKind::File => self.handle_file(path.to_path_buf(), queue),
         }
     }
 
@@ -472,7 +484,10 @@ impl WatcherState {
         let gone_entries: Vec<OsString> = tracked.difference(&current).cloned().collect();
 
         for name in new_entries {
-            self.dispatch(&path.join(&name), queue, acquired, released);
+            let child = path.join(&name);
+            if let Some(kind) = classify(&child) {
+                self.dispatch(&child, kind, queue, acquired, released);
+            }
         }
         for name in gone_entries {
             self.handle_deletion(path.join(&name), released);
@@ -549,9 +564,17 @@ impl WatcherState {
 
     /// Materialise deferred deletes whose atomic window has passed.
     /// Returns the earliest remaining deadline (if any) so the caller can
-    /// schedule the next wake-up.
+    /// schedule the next wake-up. Also evicts expired throttle entries.
     fn flush_pending(&mut self, now: Instant, queue: &mut Vec<Report>) -> Option<Instant> {
         let window = Duration::from_millis(ATOMIC_WINDOW_MS);
+        let change_window = Duration::from_millis(CHANGE_THROTTLE_MS);
+        let remove_window = Duration::from_millis(REMOVE_THROTTLE_MS);
+
+        self.last_change
+            .retain(|_, &mut t| now.saturating_duration_since(t) < change_window);
+        self.last_remove
+            .retain(|_, &mut t| now.saturating_duration_since(t) < remove_window);
+
         let mut earliest: Option<Instant> = None;
         let mut to_flush: Vec<(PathBuf, Instant)> = Vec::new();
 
@@ -638,6 +661,13 @@ fn dispatch_worker(
     states: States,
 ) {
     while let Ok(event) = rx.recv() {
+        // Stat each path once; reuse across all watchers.
+        let path_kinds: Vec<(PathBuf, PathKind)> = event
+            .paths
+            .iter()
+            .filter_map(|p| classify(p).map(|k| (p.clone(), k)))
+            .collect();
+
         let state_arcs: Vec<Arc<Mutex<WatcherState>>> = {
             let map = states.lock().unwrap();
             map.values().cloned().collect()
@@ -649,8 +679,8 @@ fn dispatch_worker(
 
         for state_arc in state_arcs {
             let mut s = state_arc.lock().unwrap();
-            for path in &event.paths {
-                s.dispatch(path, &mut reports, &mut acquired, &mut released);
+            for (path, kind) in &path_kinds {
+                s.dispatch(path, *kind, &mut reports, &mut acquired, &mut released);
             }
         }
 
@@ -790,7 +820,7 @@ fn main() {
     })));
 
     drop(thread::spawn(move || {
-        dispatch_worker(event_rx, hub, queue, states)
+        dispatch_worker(event_rx, hub, queue, states);
     }));
     drop(thread::spawn(move || handle_reports(queue, states)));
 
