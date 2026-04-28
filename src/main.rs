@@ -180,15 +180,13 @@ fn classify(path: &Path) -> Option<PathKind> {
 fn normalize_pattern(cwd: &Path, pat: &str) -> PathBuf {
     #[cfg(windows)]
     let pat = pat.replace('/', "\\");
-    #[cfg(not(windows))]
-    let pat: &str = pat;
 
-    let p = Path::new(pat);
+    let p = Path::new(&pat);
     if p.is_absolute() {
-        PathBuf::from(pat)
+        PathBuf::from(p)
     } else {
         // path::absolute normalises `.` and `..` without touching glob metacharacters
-        path::absolute(cwd.join(pat)).unwrap_or_else(|_| cwd.join(pat))
+        path::absolute(cwd.join(p)).unwrap_or_else(|_| cwd.join(p))
     }
 }
 
