@@ -1,24 +1,28 @@
 from __future__ import annotations
+
+from .transports import AbstractProcessor
+from .transports import ProcessTransport
+from .transports import StopLoopError
+from .transports import Transport
+from .transports import TransportCallbacks
 from json import dumps
 from LSP.plugin import FileWatcher
 from LSP.plugin import FileWatcherEvent
 from LSP.plugin import FileWatcherEventType
 from LSP.plugin import FileWatcherProtocol
 from LSP.plugin import register_file_watcher_implementation
-from LSP.plugin.core.transports import AbstractProcessor
-from LSP.plugin.core.transports import ProcessTransport
-from LSP.plugin.core.transports import StopLoopError
-from LSP.plugin.core.transports import Transport
-from LSP.plugin.core.transports import TransportCallbacks
-from LSP.plugin.core.typing import Callable, cast, IO, Optional, Protocol
-from os import path
+from pathlib import Path
+from typing import Callable
+from typing import cast
+from typing import IO
+from typing import Protocol
 import sublime
 import subprocess
 import weakref
 
 platform = sublime.platform()
 binary_name = '{}-{}'.format(platform, 'universal2' if platform == 'osx' else sublime.arch())
-RUST_WATCHER_CLI_PATH = path.join(path.dirname(__file__), binary_name, 'rust-watcher')
+RUST_WATCHER_CLI_PATH = (Path(__file__).parent / binary_name / 'rust-watcher')
 
 Uid = str
 
@@ -32,7 +36,7 @@ class StringTransportHandler(AbstractProcessor[str]):
     def write_data(self, writer: IO[bytes], data: str) -> None:
         writer.write(f'{data}\n'.encode())
 
-    def read_data(self, reader: IO[bytes]) -> Optional[str]:
+    def read_data(self, reader: IO[bytes]) -> str | None:
         data = reader.readline()
         text = None
         try:
@@ -70,7 +74,7 @@ class ProcessHandler(TransportCallbacks[str]):
         if self._transport:
             self._transport.send(payload)
 
-    def end_process(self, exit_code: int, exception: Optional[Exception] = None) -> None:
+    def end_process(self, exit_code: int, exception: Exception | None = None) -> None:
         if self._transport:
             self._transport.close()
             self._transport = None
@@ -96,13 +100,13 @@ class ProcessHandler(TransportCallbacks[str]):
         uid, event_type, path = payload.split(':', 2)
         if uid not in self._pending_events:
             self._pending_events[uid] = []
-        event_kind = cast(FileWatcherEventType, event_type)
+        event_kind = cast('FileWatcherEventType', event_type)
         self._pending_events[uid].append((event_kind, path))
 
     def on_stderr_message(self, message: str) -> None:
         log(f'ERROR: {message}')
 
-    def on_transport_close(self, exit_code: int, exception: Optional[Exception]) -> None:
+    def on_transport_close(self, exit_code: int, exception: Exception | None) -> None:
         self.end_process(exit_code, exception)
 
 
@@ -201,7 +205,7 @@ class RustFileWatcher(EventCollector):
         if not handler_impl:
             log('ERROR: on_payload(): Handler already deleted')
             return
-        handler_impl.on_file_event_async([(e_type, path.join(root_path, e_path)) for (e_type, e_path) in events])
+        handler_impl.on_file_event_async([(e_type, str(Path(root_path, e_path))) for (e_type, e_path) in events])
 
 
 file_watcher = RustFileWatcher()
