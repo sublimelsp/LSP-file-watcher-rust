@@ -57,6 +57,7 @@ fn parent_process_watchdog() -> ! {
 #[cfg(target_os = "macos")]
 fn parent_process_watchdog() -> ! {
     use libc::{kevent, kqueue, EVFILT_PROC, EV_ADD, EV_ONESHOT, NOTE_EXIT};
+    use std::ptr::{null, null_mut};
 
     let ppid = unsafe { libc::getppid() };
     if ppid <= 1 {
@@ -75,27 +76,18 @@ fn parent_process_watchdog() -> ! {
         flags: EV_ADD | EV_ONESHOT,
         fflags: NOTE_EXIT,
         data: 0,
-        udata: std::ptr::null_mut(),
+        udata: null_mut(),
     };
 
     // Registration returns ESRCH if the parent already died.
-    let ret = unsafe {
-        kevent(
-            kq,
-            &raw const change,
-            1,
-            std::ptr::null_mut(),
-            0,
-            std::ptr::null(),
-        )
-    };
+    let ret = unsafe { kevent(kq, &raw const change, 1, null_mut(), 0, null()) };
     if ret < 0 {
         parent_died();
     }
 
-    let mut event = unsafe { std::mem::zeroed::<kevent>() };
+    let mut event = unsafe { mem::zeroed::<kevent>() };
     loop {
-        let n = unsafe { kevent(kq, std::ptr::null(), 0, &raw mut event, 1, std::ptr::null()) };
+        let n = unsafe { kevent(kq, null(), 0, &raw mut event, 1, null()) };
         if n > 0 {
             parent_died();
         }
@@ -115,13 +107,14 @@ fn parent_process_watchdog() -> ! {
         GetCurrentProcess, OpenProcess, WaitForSingleObject, INFINITE, PROCESS_ACCESS_RIGHTS,
     };
 
-    let mut info = [0usize; 6];
+    let mut info = [0_usize; 6];
     let mut r_len = 0;
+    let current_process = unsafe { GetCurrentProcess() };
     assert!(unsafe {
         NtQueryInformationProcess(
-            GetCurrentProcess(),
+            current_process,
             PROCESSINFOCLASS(0),
-            info.as_mut_ptr() as _,
+            info.as_mut_ptr().cast(),
             (size_of::<usize>() * 6) as _,
             &raw mut r_len,
         )
@@ -130,7 +123,7 @@ fn parent_process_watchdog() -> ! {
     assert_eq!(r_len as usize, size_of::<usize>() * 6);
 
     let ppid = info[5] as u32;
-    let Ok(pph) = (unsafe { OpenProcess(PROCESS_ACCESS_RIGHTS(0x00100000), false, ppid) }) else {
+    let Ok(pph) = (unsafe { OpenProcess(PROCESS_ACCESS_RIGHTS(0x0010_0000), false, ppid) }) else {
         parent_died();
     };
 
@@ -159,11 +152,12 @@ fn enter_efficiency_mode() {
         StateMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
             | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
     };
+    let current_process = unsafe { GetCurrentProcess() };
     let _ = unsafe {
         SetProcessInformation(
-            GetCurrentProcess(),
+            current_process,
             ProcessPowerThrottling,
-            &raw const info as _,
+            (&raw const info).cast(),
             size_of::<PROCESS_POWER_THROTTLING_STATE>() as _,
         )
     };
@@ -742,6 +736,7 @@ fn register_watcher(reg: Register, hub: HubHandle, states: States) {
 
 fn dispatch_worker(
     rx: mpsc::Receiver<notify::Event>,
+    #[allow(unused_variables)]
     hub: HubHandle,
     queue: Queue,
     states: States,
