@@ -1,16 +1,16 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io::{self, BufWriter, Write as _};
 use std::mem;
-use std::path::{self, Path, PathBuf};
+use std::path;
 use std::process::exit;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use camino::{Utf8Path, Utf8PathBuf};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use notify::Watcher as _;
 use serde::Deserialize;
@@ -190,7 +190,7 @@ impl fmt::Display for EventType {
 struct Report {
     uid: usize,
     event: EventType,
-    path: PathBuf,
+    path: Utf8PathBuf,
     timestamp: Instant,
 }
 
@@ -221,11 +221,11 @@ enum PathKind {
     File,
 }
 
-fn classify(path: &Path) -> Option<PathKind> {
+fn classify(path: &Utf8Path) -> Option<PathKind> {
     match fs::symlink_metadata(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Some(PathKind::Missing),
         Err(e) => {
-            eprintln!("watcher: stat error for {}: {e}", path.display());
+            eprintln!("watcher: stat error for {path}: {e}");
             None
         }
         Ok(m) if m.is_dir() => Some(PathKind::Dir),
@@ -233,16 +233,17 @@ fn classify(path: &Path) -> Option<PathKind> {
     }
 }
 
-fn normalize_pattern(cwd: &Path, pat: &str) -> PathBuf {
+fn normalize_pattern(cwd: &Utf8Path, pat: &str) -> Utf8PathBuf {
     #[cfg(windows)]
     let pat = pat.replace('/', "\\");
 
-    let p = Path::new(&pat);
+    let p = Utf8Path::new(&pat);
     if p.is_absolute() {
-        PathBuf::from(p)
+        p.to_owned()
     } else {
-        // path::absolute normalises `.` and `..` without touching glob metacharacters
-        path::absolute(cwd.join(p)).unwrap_or_else(|_| cwd.join(p))
+        // absolute_utf8 normalises `.` and `..` without touching glob metacharacters
+        let joined = cwd.join(p);
+        camino::absolute_utf8(&joined).unwrap_or(joined)
     }
 }
 
@@ -261,23 +262,23 @@ fn build_globset(patterns: impl IntoIterator<Item = impl AsRef<str>>) -> GlobSet
 }
 
 struct PatternMatcher {
-    literal_files: HashSet<PathBuf>,
-    literal_dirs: Vec<PathBuf>,
+    literal_files: HashSet<Utf8PathBuf>,
+    literal_dirs: Vec<Utf8PathBuf>,
     glob_set: GlobSet,
     ignore_set: GlobSet,
 }
 
 impl PatternMatcher {
-    fn new(cwd: &Path, patterns: &[String], ignores: &[String]) -> Self {
+    fn new(cwd: &Utf8Path, patterns: &[String], ignores: &[String]) -> Self {
         let mut literal_files = HashSet::new();
-        let mut literal_dirs: Vec<PathBuf> = Vec::new();
+        let mut literal_dirs: Vec<Utf8PathBuf> = Vec::new();
         let mut glob_patterns: Vec<String> = Vec::new();
         let mut ignore_patterns: Vec<String> = Vec::new();
 
         for pat in patterns {
             let abs = normalize_pattern(cwd, pat);
             if is_glob_str(pat) {
-                glob_patterns.push(abs.to_string_lossy().into_owned());
+                glob_patterns.push(abs.into_string());
             } else if abs.is_dir() {
                 literal_dirs.push(abs);
             } else {
@@ -287,7 +288,7 @@ impl PatternMatcher {
 
         for ign in ignores {
             let abs = normalize_pattern(cwd, ign);
-            let mut abs_str = abs.to_string_lossy().into_owned();
+            let mut abs_str = abs.into_string();
             if !is_glob_str(ign) {
                 // literal ignore: also add path/** to exclude children
                 let mut with_children = abs_str.clone();
@@ -306,40 +307,39 @@ impl PatternMatcher {
         }
     }
 
-    fn matches(&self, path: &Path) -> bool {
+    fn matches(&self, path: &Utf8Path) -> bool {
         self.literal_files.contains(path)
             || self.literal_dirs.iter().any(|d| path.starts_with(d))
             || self.glob_set.is_match(path)
     }
 
-    fn is_ignored(&self, path: &Path) -> bool {
+    fn is_ignored(&self, path: &Utf8Path) -> bool {
         if self.ignore_set.is_match(path) {
             return true;
         }
         // Mirror chokidar's DOT_RE: /\..*\.(sw[px])$|~$|\.subl.*\.tmp/
         // tested against the full path string.
-        if let Some(s) = path.to_str() {
-            if s.ends_with('~') {
-                return true;
-            }
-            for suffix in [".swp", ".swx", ".swpx"] {
-                if let Some(stripped) = s.strip_suffix(suffix) {
-                    // \..*\.swp$ requires a dot before the trailing suffix.
-                    if stripped.contains('.') {
-                        return true;
-                    }
-                }
-            }
-            if let Some(idx) = s.find(".subl") {
-                if s[idx + ".subl".len()..].contains(".tmp") {
+        let s = path.as_str();
+        if s.ends_with('~') {
+            return true;
+        }
+        for suffix in [".swp", ".swx", ".swpx"] {
+            if let Some(stripped) = s.strip_suffix(suffix) {
+                // \..*\.swp$ requires a dot before the trailing suffix.
+                if stripped.contains('.') {
                     return true;
                 }
+            }
+        }
+        if let Some(idx) = s.find(".subl") {
+            if s[idx + ".subl".len()..].contains(".tmp") {
+                return true;
             }
         }
         false
     }
 
-    fn is_emittable(&self, path: &Path) -> bool {
+    fn is_emittable(&self, path: &Utf8Path) -> bool {
         self.matches(path) && !self.is_ignored(path)
     }
 }
@@ -350,23 +350,23 @@ const ATOMIC_WINDOW_MS: u64 = 100;
 
 struct WatcherState {
     uid: usize,
-    cwd: PathBuf,
+    cwd: Utf8PathBuf,
     events: Vec<EventType>,
     matcher: PatternMatcher,
     // Every emittable file we currently know about.
-    tracked_files: HashSet<PathBuf>,
+    tracked_files: HashSet<Utf8PathBuf>,
     // Tracked directory → set of child basenames (dirs and emittable files).
-    tracked_dirs: HashMap<PathBuf, HashSet<OsString>>,
+    tracked_dirs: HashMap<Utf8PathBuf, HashSet<String>>,
     // Per-path last-emit timestamps for throttling.
-    last_change: HashMap<PathBuf, Instant>,
-    last_remove: HashMap<PathBuf, Instant>,
+    last_change: HashMap<Utf8PathBuf, Instant>,
+    last_remove: HashMap<Utf8PathBuf, Instant>,
     // Deferred delete events (atomic-write detection).
     // Value = original event time (deadline = value + ATOMIC_WINDOW_MS).
-    pending_unlinks: HashMap<PathBuf, Instant>,
+    pending_unlinks: HashMap<Utf8PathBuf, Instant>,
 }
 
 impl WatcherState {
-    fn new(uid: usize, cwd: PathBuf, events: Vec<EventType>, matcher: PatternMatcher) -> Self {
+    fn new(uid: usize, cwd: Utf8PathBuf, events: Vec<EventType>, matcher: PatternMatcher) -> Self {
         Self {
             uid,
             cwd,
@@ -391,13 +391,14 @@ impl WatcherState {
             tracked_files,
             ..
         } = self;
-        let walker = WalkDir::new(&*cwd).follow_links(false);
-        for entry in walker
-            .into_iter()
-            .filter_entry(|e| e.path() == *cwd || !matcher.is_ignored(e.path()))
-        {
+        let walker = WalkDir::new(cwd.as_std_path()).follow_links(false);
+        for entry in walker.into_iter().filter_entry(|e| {
+            Utf8Path::from_path(e.path()).is_none_or(|p| p == *cwd || !matcher.is_ignored(p))
+        }) {
             let Ok(entry) = entry else { continue };
-            let path = entry.path().to_path_buf();
+            let Some(path) = Utf8Path::from_path(entry.path()).map(Utf8Path::to_path_buf) else {
+                continue;
+            };
             let file_type = entry.file_type();
 
             if file_type.is_dir() {
@@ -406,7 +407,7 @@ impl WatcherState {
                         tracked_dirs
                             .entry(parent.to_path_buf())
                             .or_default()
-                            .insert(name.to_os_string());
+                            .insert(name.to_owned());
                     }
                 }
                 tracked_dirs.entry(path).or_default();
@@ -416,7 +417,7 @@ impl WatcherState {
                     tracked_dirs
                         .entry(parent.to_path_buf())
                         .or_default()
-                        .insert(name.to_os_string());
+                        .insert(name.to_owned());
                 }
                 tracked_files.insert(path);
             }
@@ -425,11 +426,11 @@ impl WatcherState {
 
     fn dispatch(
         &mut self,
-        path: &Path,
+        path: &Utf8Path,
         kind: PathKind,
         queue: &mut Vec<Report>,
-        acquired: &mut Vec<PathBuf>,
-        released: &mut Vec<PathBuf>,
+        acquired: &mut Vec<Utf8PathBuf>,
+        released: &mut Vec<Utf8PathBuf>,
     ) {
         if !path.starts_with(&self.cwd) {
             return;
@@ -441,13 +442,13 @@ impl WatcherState {
         }
     }
 
-    fn handle_deletion(&mut self, path: PathBuf, released: &mut Vec<PathBuf>) {
+    fn handle_deletion(&mut self, path: Utf8PathBuf, released: &mut Vec<Utf8PathBuf>) {
         let parent = match path.parent() {
             Some(p) => p.to_path_buf(),
             None => return,
         };
         let name = match path.file_name() {
-            Some(n) => n.to_os_string(),
+            Some(n) => n.to_owned(),
             None => return,
         };
 
@@ -501,10 +502,10 @@ impl WatcherState {
 
     fn handle_directory(
         &mut self,
-        path: PathBuf,
+        path: Utf8PathBuf,
         queue: &mut Vec<Report>,
-        acquired: &mut Vec<PathBuf>,
-        released: &mut Vec<PathBuf>,
+        acquired: &mut Vec<Utf8PathBuf>,
+        released: &mut Vec<Utf8PathBuf>,
     ) {
         // Take the previous child set out of self so we can mutate `self`
         // freely below without re-borrowing it for the diff.
@@ -517,12 +518,12 @@ impl WatcherState {
                 self.tracked_dirs
                     .entry(parent.to_path_buf())
                     .or_default()
-                    .insert(name.to_os_string());
+                    .insert(name.to_owned());
             }
         }
 
         // Snapshot what's currently on disk (filtered).
-        let current: HashSet<OsString> = match fs::read_dir(&path) {
+        let current: HashSet<String> = match fs::read_dir(&path) {
             Err(_) => {
                 // Restore the previous tracking so we don't lose state on a transient stat failure.
                 self.tracked_dirs.insert(path, prev);
@@ -531,27 +532,28 @@ impl WatcherState {
             Ok(rd) => rd
                 .filter_map(Result::ok)
                 .filter_map(|entry| {
-                    let cp = entry.path();
+                    let cp = Utf8PathBuf::from_path_buf(entry.path()).ok()?;
+                    let name = entry.file_name().into_string().ok()?;
                     let ft = entry.file_type().ok()?;
                     if ft.is_dir() {
                         if self.matcher.is_ignored(&cp) {
                             None
                         } else {
-                            Some(entry.file_name())
+                            Some(name)
                         }
                     } else {
-                        self.matcher.is_emittable(&cp).then(|| entry.file_name())
+                        self.matcher.is_emittable(&cp).then_some(name)
                     }
                 })
                 .collect(),
         };
 
-        // Partition by moving OsStrings instead of cloning:
+        // Partition by moving Strings instead of cloning:
         //   - in current and prev   → intersection (still tracked)
         //   - in current, not prev  → new_entries  (dispatch as new)
         //   - in prev, not current  → gone        (left in `prev`, then deleted)
-        let mut new_entries: Vec<OsString> = Vec::new();
-        let mut intersection: HashSet<OsString> = HashSet::with_capacity(prev.len());
+        let mut new_entries: Vec<String> = Vec::new();
+        let mut intersection: HashSet<String> = HashSet::with_capacity(prev.len());
         for name in current {
             if prev.remove(&name) {
                 intersection.insert(name);
@@ -582,7 +584,7 @@ impl WatcherState {
             .extend(intersection);
     }
 
-    fn handle_file(&mut self, path: PathBuf, queue: &mut Vec<Report>) {
+    fn handle_file(&mut self, path: Utf8PathBuf, queue: &mut Vec<Report>) {
         if !self.matcher.is_emittable(&path) {
             return;
         }
@@ -592,7 +594,7 @@ impl WatcherState {
             None => return,
         };
         let name = match path.file_name() {
-            Some(n) => n.to_os_string(),
+            Some(n) => n.to_owned(),
             None => return,
         };
 
@@ -643,7 +645,7 @@ impl WatcherState {
         }
     }
 
-    fn allow_change(&mut self, path: &Path, now: Instant) -> bool {
+    fn allow_change(&mut self, path: &Utf8Path, now: Instant) -> bool {
         if let Some(&last) = self.last_change.get(path) {
             if now.duration_since(last) < Duration::from_millis(CHANGE_THROTTLE_MS) {
                 return false;
@@ -710,26 +712,26 @@ const WATCH_MODE: notify::RecursiveMode = notify::RecursiveMode::NonRecursive;
 // watch per cwd, deduplicated across overlapping registrations).
 struct Hub {
     watcher: notify::RecommendedWatcher,
-    refs: HashMap<PathBuf, usize>,
+    refs: HashMap<Utf8PathBuf, usize>,
 }
 
 impl Hub {
-    fn acquire(&mut self, path: &Path) {
+    fn acquire(&mut self, path: &Utf8Path) {
         let n = self.refs.entry(path.to_path_buf()).or_insert(0);
         *n += 1;
         if *n == 1 {
-            if let Err(e) = self.watcher.watch(path, WATCH_MODE) {
-                eprintln!("watch({}) failed: {e:?}", path.display());
+            if let Err(e) = self.watcher.watch(path.as_std_path(), WATCH_MODE) {
+                eprintln!("watch({path}) failed: {e:?}");
             }
         }
     }
 
-    fn release(&mut self, path: &Path) {
+    fn release(&mut self, path: &Utf8Path) {
         if let Some(n) = self.refs.get_mut(path) {
             *n -= 1;
             if *n == 0 {
                 self.refs.remove(path);
-                let _ = self.watcher.unwatch(path);
+                let _ = self.watcher.unwatch(path.as_std_path());
             }
         }
     }
@@ -741,7 +743,7 @@ type HubHandle = &'static Mutex<Hub>;
 
 fn register_watcher(reg: Register, hub: HubHandle, states: States) {
     let uid = reg.uid;
-    let cwd = path::absolute(&reg.cwd).unwrap_or_else(|_| PathBuf::from(&reg.cwd));
+    let cwd = camino::absolute_utf8(&reg.cwd).unwrap_or_else(|_| Utf8PathBuf::from(&reg.cwd));
     let matcher = PatternMatcher::new(&cwd, &reg.patterns, &reg.ignores);
 
     let mut state = WatcherState::new(uid, cwd, reg.events, matcher);
@@ -755,7 +757,7 @@ fn register_watcher(reg: Register, hub: HubHandle, states: States) {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let dirs: Vec<PathBuf> = state.tracked_dirs.keys().cloned().collect();
+        let dirs: Vec<Utf8PathBuf> = state.tracked_dirs.keys().cloned().collect();
         let mut h = hub.lock().unwrap();
         for dir in dirs {
             h.acquire(&dir);
@@ -774,9 +776,10 @@ fn dispatch_worker(
 ) {
     while let Ok(event) = rx.recv() {
         // Stat each path once; reuse across all watchers.
-        let path_kinds: Vec<(PathBuf, PathKind)> = event
+        let path_kinds: Vec<(Utf8PathBuf, PathKind)> = event
             .paths
             .into_iter()
+            .filter_map(|p| Utf8PathBuf::from_path_buf(p).ok())
             .filter_map(|p| classify(&p).map(|k| (p, k)))
             .collect();
 
@@ -786,8 +789,8 @@ fn dispatch_worker(
         };
 
         let mut reports: Vec<Report> = Vec::new();
-        let mut acquired: Vec<PathBuf> = Vec::new();
-        let mut released: Vec<PathBuf> = Vec::new();
+        let mut acquired: Vec<Utf8PathBuf> = Vec::new();
+        let mut released: Vec<Utf8PathBuf> = Vec::new();
 
         for state_arc in state_arcs {
             let mut s = state_arc.lock().unwrap();
@@ -865,7 +868,7 @@ fn handle_reports(queue: Queue, states: States) -> ! {
         };
 
         // Collapse overlapping events for the same (uid, path), preserving order.
-        let mut path_states: HashMap<(usize, PathBuf), (usize, EventType)> = HashMap::new();
+        let mut path_states: HashMap<(usize, Utf8PathBuf), (usize, EventType)> = HashMap::new();
         for (i, report) in q.into_iter().enumerate() {
             let Report {
                 uid, event, path, ..
@@ -900,7 +903,7 @@ fn handle_reports(queue: Queue, states: States) -> ! {
 
         let mut stdout = BufWriter::new(io::stdout().lock());
         for (_, uid, event, path) in ordered {
-            let _ = writeln!(stdout, "{}:{}:{}", uid, event, path.display());
+            let _ = writeln!(stdout, "{uid}:{event}:{path}");
         }
         let _ = writeln!(stdout, "<flush>");
     }
@@ -962,7 +965,7 @@ fn main() {
                         }
                         #[cfg(not(target_os = "macos"))]
                         {
-                            let dirs: Vec<PathBuf> =
+                            let dirs: Vec<Utf8PathBuf> =
                                 arc.lock().unwrap().tracked_dirs.keys().cloned().collect();
                             let mut h = hub.lock().unwrap();
                             for dir in dirs {
