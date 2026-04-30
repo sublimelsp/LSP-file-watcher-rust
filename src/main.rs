@@ -23,25 +23,33 @@ fn parent_died() -> ! {
 
 #[cfg(target_os = "linux")]
 fn parent_process_watchdog() -> ! {
-    use rustix::event::{poll, PollFd, PollFlags};
-    use rustix::io::Errno;
-    use rustix::process::{getppid, pidfd_open, PidfdFlags};
-
-    let Some(ppid) = getppid() else {
+    let ppid = unsafe { libc::getppid() };
+    if ppid <= 1 {
         parent_died();
-    };
+    }
 
-    let Ok(ppid_fd) = pidfd_open(ppid, PidfdFlags::empty()) else {
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, ppid, 0) };
+    if pidfd < 0 {
         parent_died();
-    };
+    }
 
-    let mut fds = [PollFd::new(&ppid_fd, PollFlags::IN)];
+    #[allow(clippy::cast_possible_truncation)]
+    let mut fds = [libc::pollfd {
+        fd: pidfd as i32,
+        events: libc::POLLIN,
+        revents: 0,
+    }];
 
     loop {
-        match poll(&mut fds, -1) {
-            Ok(_) => parent_died(),
-            Err(Errno::INTR) => {}
-            Err(e) => panic!("poll failed: {e:?}"),
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), 1, -1) };
+        if n > 0 {
+            parent_died();
+        }
+        if n < 0 {
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if errno != libc::EINTR {
+                parent_died();
+            }
         }
     }
 }
@@ -132,9 +140,8 @@ fn parent_process_watchdog() -> ! {
 
 #[cfg(target_os = "linux")]
 fn enter_efficiency_mode() {
-    use rustix::process::{sched_setscheduler, SchedParam, SchedPolicy};
-
-    let _ = sched_setscheduler(None, SchedPolicy::Batch, &SchedParam::default());
+    let param: libc::sched_param = unsafe { std::mem::zeroed() };
+    let _ = unsafe { libc::sched_setscheduler(0, libc::SCHED_BATCH, &raw const param) };
 }
 
 #[cfg(windows)]
