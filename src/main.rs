@@ -16,7 +16,6 @@ use notify::Watcher as _;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn parent_died() -> ! {
     eprintln!("parent process died");
     exit(1);
@@ -163,8 +162,10 @@ fn enter_efficiency_mode() {
     };
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
-fn enter_efficiency_mode() {}
+#[cfg(target_os = "macos")]
+fn enter_efficiency_mode() {
+    let _ = unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, libc::PRIO_DARWIN_BG) };
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -844,16 +845,11 @@ fn handle_reports(queue: Queue, states: States) -> ! {
 }
 
 fn main() {
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    compile_error!("unsupported platform");
-
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     {
         enter_efficiency_mode();
         drop(thread::spawn(parent_process_watchdog));
     }
-    #[cfg(target_os = "macos")]
-    drop(thread::spawn(parent_process_watchdog));
 
     let queue: Queue = Box::leak(Box::new(Mutex::new(Vec::new())));
     let states: States = Box::leak(Box::new(Mutex::new(HashMap::new())));
