@@ -49,6 +49,10 @@ jobs:
         run: ./scripts/parity_check.sh --no-build
       - name: Run watchdog check
         run: ./scripts/watchdog_check.sh
+        if: ${{ env.OS_NAME != 'windows' }}
+      - name: Run watchdog check (Windows)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/watchdog_check.ps1
+        if: ${{ env.OS_NAME == 'windows' }}
       - name: Build for aarch64
         run: cargo build --profile release --target aarch64-${{ env.TRIPLE_SUFFIX }}
       - name: Create universal binary
