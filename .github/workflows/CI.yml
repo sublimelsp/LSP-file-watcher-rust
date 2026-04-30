@@ -47,6 +47,8 @@ jobs:
         run: cargo build --profile release
       - name: Run parity check
         run: ./scripts/parity_check.sh --no-build
+      - name: Run watchdog check
+        run: ./scripts/watchdog_check.sh
       - name: Build for aarch64
         run: cargo build --profile release --target aarch64-${{ env.TRIPLE_SUFFIX }}
       - name: Create universal binary
