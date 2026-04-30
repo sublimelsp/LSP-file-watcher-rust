@@ -211,7 +211,7 @@ enum Request {
 }
 
 fn is_glob_str(s: &str) -> bool {
-    s.contains('*') || s.contains('?') || s.contains('{') || s.contains('[') || s.starts_with('!')
+    s.bytes().next() == Some(b'!') || s.bytes().any(|ch| matches!(ch, b'*' | b'?' | b'{' | b'['))
 }
 
 #[derive(Copy, Clone)]
@@ -287,14 +287,15 @@ impl PatternMatcher {
 
         for ign in ignores {
             let abs = normalize_pattern(cwd, ign);
-            let abs_str = abs.to_string_lossy().into_owned();
-            if is_glob_str(ign) {
-                ignore_patterns.push(abs_str);
-            } else {
+            let mut abs_str = abs.to_string_lossy().into_owned();
+            if !is_glob_str(ign) {
                 // literal ignore: also add path/** to exclude children
-                ignore_patterns.push(abs_str.clone());
-                ignore_patterns.push(format!("{}{sep}**", abs_str, sep = path::MAIN_SEPARATOR));
+                let mut with_children = abs_str.clone();
+                with_children.extend([path::MAIN_SEPARATOR, '*', '*']);
+                mem::swap(&mut abs_str, &mut with_children);
+                ignore_patterns.push(with_children);
             }
+            ignore_patterns.push(abs_str);
         }
 
         Self {
@@ -380,36 +381,44 @@ impl WatcherState {
     }
 
     fn initial_scan(&mut self) {
-        let cwd = self.cwd.clone();
-        let walker = WalkDir::new(&cwd).follow_links(false);
+        // Disjoint field borrows: the walker's filter_entry closure captures
+        // `cwd` and `matcher` immutably while the loop body mutates the two
+        // tracking maps — keeps `self.cwd` accessible without cloning.
+        let Self {
+            cwd,
+            matcher,
+            tracked_dirs,
+            tracked_files,
+            ..
+        } = self;
+        let walker = WalkDir::new(&*cwd).follow_links(false);
         for entry in walker
             .into_iter()
-            .filter_entry(|e| e.path() == cwd || !self.matcher.is_ignored(e.path()))
+            .filter_entry(|e| e.path() == *cwd || !matcher.is_ignored(e.path()))
         {
             let Ok(entry) = entry else { continue };
             let path = entry.path().to_path_buf();
             let file_type = entry.file_type();
 
             if file_type.is_dir() {
-                self.tracked_dirs.entry(path.clone()).or_default();
-                if path != cwd {
+                if &path != cwd {
                     if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
-                        self.tracked_dirs
+                        tracked_dirs
                             .entry(parent.to_path_buf())
                             .or_default()
                             .insert(name.to_os_string());
                     }
                 }
-            } else if (file_type.is_file() || file_type.is_symlink())
-                && self.matcher.is_emittable(&path)
+                tracked_dirs.entry(path).or_default();
+            } else if (file_type.is_file() || file_type.is_symlink()) && matcher.is_emittable(&path)
             {
-                self.tracked_files.insert(path.clone());
                 if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
-                    self.tracked_dirs
+                    tracked_dirs
                         .entry(parent.to_path_buf())
                         .or_default()
                         .insert(name.to_os_string());
                 }
+                tracked_files.insert(path);
             }
         }
     }
@@ -460,30 +469,33 @@ impl WatcherState {
         self.last_remove.insert(path.clone(), now);
 
         if was_tracked_dir {
-            // Collect children *before* modifying tracked_dirs so the borrow ends.
-            let children: Vec<OsString> = self
-                .tracked_dirs
-                .get(&path)
-                .map(|s| s.iter().cloned().collect())
-                .unwrap_or_default();
-            self.tracked_dirs.remove(&path);
-            released.push(path.clone());
-            for child in children {
-                self.handle_deletion(path.join(&child), released);
+            let children = self.tracked_dirs.remove(&path).unwrap_or_default();
+            for child in &children {
+                self.handle_deletion(path.join(child), released);
             }
         }
 
         if was_tracked_file {
             self.tracked_files.remove(&path);
-            if self.events.contains(&EventType::Delete) {
-                // Defer: wait for a possible same-path Add within the atomic window.
-                self.pending_unlinks.insert(path.clone(), now);
-            }
         }
 
         // Remove from parent's child set.
         if let Some(parent_set) = self.tracked_dirs.get_mut(&parent) {
             parent_set.remove(&name);
+        }
+
+        let defer_unlink = was_tracked_file && self.events.contains(&EventType::Delete);
+        match (was_tracked_dir, defer_unlink) {
+            (true, true) => {
+                released.push(path.clone());
+                // Defer: wait for a possible same-path Add within the atomic window.
+                self.pending_unlinks.insert(path, now);
+            }
+            (true, false) => released.push(path),
+            (false, true) => {
+                self.pending_unlinks.insert(path, now);
+            }
+            (false, false) => {}
         }
     }
 
@@ -494,11 +506,12 @@ impl WatcherState {
         acquired: &mut Vec<PathBuf>,
         released: &mut Vec<PathBuf>,
     ) {
-        // Track new directories so the hub can install a watch on them.
-        if !self.tracked_dirs.contains_key(&path) {
-            acquired.push(path.clone());
-        }
-        self.tracked_dirs.entry(path.clone()).or_default();
+        // Take the previous child set out of self so we can mutate `self`
+        // freely below without re-borrowing it for the diff.
+        let prev_opt = self.tracked_dirs.remove(&path);
+        let already_tracked = prev_opt.is_some();
+        let mut prev = prev_opt.unwrap_or_default();
+
         if path != self.cwd {
             if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
                 self.tracked_dirs
@@ -510,7 +523,11 @@ impl WatcherState {
 
         // Snapshot what's currently on disk (filtered).
         let current: HashSet<OsString> = match fs::read_dir(&path) {
-            Err(_) => return,
+            Err(_) => {
+                // Restore the previous tracking so we don't lose state on a transient stat failure.
+                self.tracked_dirs.insert(path, prev);
+                return;
+            }
             Ok(rd) => rd
                 .filter_map(Result::ok)
                 .filter_map(|entry| {
@@ -529,13 +546,19 @@ impl WatcherState {
                 .collect(),
         };
 
-        // Snapshot the previously-tracked children.
-        let tracked: HashSet<OsString> = self.tracked_dirs.get(&path).cloned().unwrap_or_default();
-
-        // New entries (on disk, not yet tracked) → dispatch each.
-        let new_entries: Vec<OsString> = current.difference(&tracked).cloned().collect();
-        // Gone entries (tracked, not on disk) → deletion path.
-        let gone_entries: Vec<OsString> = tracked.difference(&current).cloned().collect();
+        // Partition by moving OsStrings instead of cloning:
+        //   - in current and prev   → intersection (still tracked)
+        //   - in current, not prev  → new_entries  (dispatch as new)
+        //   - in prev, not current  → gone        (left in `prev`, then deleted)
+        let mut new_entries: Vec<OsString> = Vec::new();
+        let mut intersection: HashSet<OsString> = HashSet::with_capacity(prev.len());
+        for name in current {
+            if prev.remove(&name) {
+                intersection.insert(name);
+            } else {
+                new_entries.push(name);
+            }
+        }
 
         for name in new_entries {
             let child = path.join(&name);
@@ -543,9 +566,20 @@ impl WatcherState {
                 self.dispatch(&child, kind, queue, acquired, released);
             }
         }
-        for name in gone_entries {
+        for name in prev {
             self.handle_deletion(path.join(&name), released);
         }
+
+        // Track new directories so the hub can install a watch on them.
+        if !already_tracked {
+            acquired.push(path.clone());
+        }
+        // Dispatch repopulated tracked_dirs[path] with the new entries; merge the
+        // surviving intersection back in so the entry mirrors on-disk state.
+        self.tracked_dirs
+            .entry(path)
+            .or_default()
+            .extend(intersection);
     }
 
     fn handle_file(&mut self, path: PathBuf, queue: &mut Vec<Report>) {
@@ -565,20 +599,21 @@ impl WatcherState {
         let was_tracked = self.tracked_files.contains(&path);
         let now = Instant::now();
 
-        if self.pending_unlinks.contains_key(&path) {
+        if self.pending_unlinks.remove(&path).is_some() {
             // Atomic write: an unlink was pending for this path and an add arrived.
             // Emit change instead of (delete + create).
-            self.pending_unlinks.remove(&path);
-            self.tracked_files.insert(path.clone());
             self.tracked_dirs.entry(parent).or_default().insert(name);
 
             if self.events.contains(&EventType::Change) && self.allow_change(&path, now) {
+                self.tracked_files.insert(path.clone());
                 queue.push(Report {
                     uid: self.uid,
                     event: EventType::Change,
                     path,
                     timestamp: now,
                 });
+            } else {
+                self.tracked_files.insert(path);
             }
         } else if was_tracked {
             // Known file — emit change with 50 ms throttle.
@@ -592,16 +627,18 @@ impl WatcherState {
             }
         } else {
             // New file — emit create.
-            self.tracked_files.insert(path.clone());
             self.tracked_dirs.entry(parent).or_default().insert(name);
 
             if self.events.contains(&EventType::Create) {
+                self.tracked_files.insert(path.clone());
                 queue.push(Report {
                     uid: self.uid,
                     event: EventType::Create,
                     path,
                     timestamp: now,
                 });
+            } else {
+                self.tracked_files.insert(path);
             }
         }
     }
@@ -630,25 +667,20 @@ impl WatcherState {
             .retain(|_, &mut t| now.saturating_duration_since(t) < remove_window);
 
         let mut earliest: Option<Instant> = None;
-        let mut to_flush: Vec<(PathBuf, Instant)> = Vec::new();
-
-        for (path, &orig) in &self.pending_unlinks {
+        let pending = mem::take(&mut self.pending_unlinks);
+        for (path, orig) in pending {
             let deadline = orig + window;
             if now >= deadline {
-                to_flush.push((path.clone(), orig));
+                queue.push(Report {
+                    uid: self.uid,
+                    event: EventType::Delete,
+                    path,
+                    timestamp: orig,
+                });
             } else {
                 earliest = Some(earliest.map_or(deadline, |e| e.min(deadline)));
+                self.pending_unlinks.insert(path, orig);
             }
-        }
-
-        for (path, orig) in to_flush {
-            self.pending_unlinks.remove(&path);
-            queue.push(Report {
-                uid: self.uid,
-                event: EventType::Delete,
-                path,
-                timestamp: orig,
-            });
         }
 
         earliest
@@ -736,8 +768,7 @@ fn register_watcher(reg: Register, hub: HubHandle, states: States) {
 
 fn dispatch_worker(
     rx: mpsc::Receiver<notify::Event>,
-    #[allow(unused_variables)]
-    hub: HubHandle,
+    #[allow(unused_variables)] hub: HubHandle,
     queue: Queue,
     states: States,
 ) {
@@ -745,8 +776,8 @@ fn dispatch_worker(
         // Stat each path once; reuse across all watchers.
         let path_kinds: Vec<(PathBuf, PathKind)> = event
             .paths
-            .iter()
-            .filter_map(|p| classify(p).map(|k| (p.clone(), k)))
+            .into_iter()
+            .filter_map(|p| classify(&p).map(|k| (p, k)))
             .collect();
 
         let state_arcs: Vec<Arc<Mutex<WatcherState>>> = {
