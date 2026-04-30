@@ -214,6 +214,7 @@ name = "rust-watcher"
 version = "0.1.0"
 dependencies = [
  "globset",
+ "libc",
  "notify",
  "rustix",
  "serde",

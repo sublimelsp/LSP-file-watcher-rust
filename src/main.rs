@@ -16,7 +16,7 @@ use notify::Watcher as _;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn parent_died() -> ! {
     eprintln!("parent process died");
     exit(1);
@@ -43,6 +43,60 @@ fn parent_process_watchdog() -> ! {
             Ok(_) => parent_died(),
             Err(Errno::INTR) => {}
             Err(e) => panic!("poll failed: {e:?}"),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn parent_process_watchdog() -> ! {
+    use libc::{kevent, kqueue, EVFILT_PROC, EV_ADD, EV_ONESHOT, NOTE_EXIT};
+
+    let ppid = unsafe { libc::getppid() };
+    if ppid <= 1 {
+        parent_died();
+    }
+
+    let kq = unsafe { kqueue() };
+    if kq < 0 {
+        parent_died();
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    let change = kevent {
+        ident: ppid as usize,
+        filter: EVFILT_PROC,
+        flags: EV_ADD | EV_ONESHOT,
+        fflags: NOTE_EXIT,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+
+    // Registration returns ESRCH if the parent already died.
+    let ret = unsafe {
+        kevent(
+            kq,
+            &raw const change,
+            1,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if ret < 0 {
+        parent_died();
+    }
+
+    let mut event = unsafe { std::mem::zeroed::<kevent>() };
+    loop {
+        let n = unsafe { kevent(kq, std::ptr::null(), 0, &raw mut event, 1, std::ptr::null()) };
+        if n > 0 {
+            parent_died();
+        }
+        if n < 0 {
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if errno != libc::EINTR {
+                parent_died();
+            }
         }
     }
 }
@@ -798,6 +852,8 @@ fn main() {
         enter_efficiency_mode();
         drop(thread::spawn(parent_process_watchdog));
     }
+    #[cfg(target_os = "macos")]
+    drop(thread::spawn(parent_process_watchdog));
 
     let queue: Queue = Box::leak(Box::new(Mutex::new(Vec::new())));
     let states: States = Box::leak(Box::new(Mutex::new(HashMap::new())));
