@@ -47,6 +47,8 @@ jobs:
         run: cargo build --profile release
       - name: Run parity check
         run: ./scripts/parity_check.sh --no-build
+      - name: Run performance check
+        run: ./scripts/perf_check.sh
       - name: Run watchdog check
         run: ./scripts/watchdog_check.sh
         if: ${{ env.OS_NAME != 'windows' }}

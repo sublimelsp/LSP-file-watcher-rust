@@ -46,7 +46,7 @@ fn parent_process_watchdog() -> ! {
             parent_died();
         }
         if n < 0 {
-            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
             if errno != libc::EINTR {
                 parent_died();
             }
@@ -100,7 +100,7 @@ fn parent_process_watchdog() -> ! {
             parent_died();
         }
         if n < 0 {
-            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
             if errno != libc::EINTR {
                 parent_died();
             }
@@ -140,7 +140,7 @@ fn parent_process_watchdog() -> ! {
 
 #[cfg(target_os = "linux")]
 fn enter_efficiency_mode() {
-    let param: libc::sched_param = unsafe { std::mem::zeroed() };
+    let param: libc::sched_param = unsafe { mem::zeroed() };
     let _ = unsafe { libc::sched_setscheduler(0, libc::SCHED_BATCH, &raw const param) };
 }
 
@@ -661,29 +661,49 @@ impl WatcherState {
     }
 }
 
-// Owns the single RecommendedWatcher and refcounts OS-level directory watches.
+// FSEvents on macOS is inherently recursive and incurs a full stream
+// stop/restart per `watch()` call (see notify::fsevent::watch_inner). Acquiring
+// one watch per directory under cwd would mean N stream restarts for an
+// initial scan, taking ~1 s each on real projects. Instead we install a single
+// recursive watch on each registration's cwd and rely on PatternMatcher /
+// WatcherState to filter sub-tree events in user space (mirroring chokidar 3).
+//
+// On Linux/Windows the inotify/ReadDirectoryChangesW backends do not support
+// recursive natively, so notify simulates it by watching each directory
+// individually. With overlapping registrations (common in LSP), per-dir
+// refcounting via Hub avoids redundant kernel-level watches on the same inode.
+#[cfg(target_os = "macos")]
+const WATCH_MODE: notify::RecursiveMode = notify::RecursiveMode::Recursive;
+#[cfg(not(target_os = "macos"))]
+const WATCH_MODE: notify::RecursiveMode = notify::RecursiveMode::NonRecursive;
+
+// Owns the single RecommendedWatcher and refcounts OS-level watches.
+//
+// On Linux/Windows the keys are every directory inside each registration's
+// tracked subtree. On macOS the keys are the registration cwds (one recursive
+// watch per cwd, deduplicated across overlapping registrations).
 struct Hub {
     watcher: notify::RecommendedWatcher,
-    dir_refs: HashMap<PathBuf, usize>,
+    refs: HashMap<PathBuf, usize>,
 }
 
 impl Hub {
-    fn acquire(&mut self, dir: &Path) {
-        let n = self.dir_refs.entry(dir.to_path_buf()).or_insert(0);
+    fn acquire(&mut self, path: &Path) {
+        let n = self.refs.entry(path.to_path_buf()).or_insert(0);
         *n += 1;
         if *n == 1 {
-            if let Err(e) = self.watcher.watch(dir, notify::RecursiveMode::NonRecursive) {
-                eprintln!("watch({}) failed: {e:?}", dir.display());
+            if let Err(e) = self.watcher.watch(path, WATCH_MODE) {
+                eprintln!("watch({}) failed: {e:?}", path.display());
             }
         }
     }
 
-    fn release(&mut self, dir: &Path) {
-        if let Some(n) = self.dir_refs.get_mut(dir) {
+    fn release(&mut self, path: &Path) {
+        if let Some(n) = self.refs.get_mut(path) {
             *n -= 1;
             if *n == 0 {
-                self.dir_refs.remove(dir);
-                let _ = self.watcher.unwatch(dir);
+                self.refs.remove(path);
+                let _ = self.watcher.unwatch(path);
             }
         }
     }
@@ -701,7 +721,13 @@ fn register_watcher(reg: Register, hub: HubHandle, states: States) {
     let mut state = WatcherState::new(uid, cwd, reg.events, matcher);
     state.initial_scan();
 
-    // Acquire one non-recursive OS watch per directory discovered in the scan.
+    // macOS: a single recursive FSEvents watch on cwd covers the whole subtree.
+    // Other OSes: one non-recursive watch per directory discovered in the scan.
+    #[cfg(target_os = "macos")]
+    {
+        hub.lock().unwrap().acquire(&state.cwd);
+    }
+    #[cfg(not(target_os = "macos"))]
     {
         let dirs: Vec<PathBuf> = state.tracked_dirs.keys().cloned().collect();
         let mut h = hub.lock().unwrap();
@@ -744,6 +770,9 @@ fn dispatch_worker(
             }
         }
 
+        // The recursive macOS watch already covers any new sub-directory, so
+        // the deltas WatcherState produces are simply discarded there.
+        #[cfg(not(target_os = "macos"))]
         if !acquired.is_empty() || !released.is_empty() {
             let mut h = hub.lock().unwrap();
             for dir in acquired {
@@ -873,7 +902,7 @@ fn main() {
 
     let hub: HubHandle = Box::leak(Box::new(Mutex::new(Hub {
         watcher,
-        dir_refs: HashMap::new(),
+        refs: HashMap::new(),
     })));
 
     drop(thread::spawn(move || {
@@ -900,12 +929,19 @@ fn main() {
                 match state {
                     None => eprintln!("watcher with ID {uid} not found"),
                     Some(arc) => {
-                        // Collect dirs while we still have the Arc.
-                        let dirs: Vec<PathBuf> =
-                            arc.lock().unwrap().tracked_dirs.keys().cloned().collect();
-                        let mut h = hub.lock().unwrap();
-                        for dir in dirs {
-                            h.release(&dir);
+                        #[cfg(target_os = "macos")]
+                        {
+                            let cwd = arc.lock().unwrap().cwd.clone();
+                            hub.lock().unwrap().release(&cwd);
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            let dirs: Vec<PathBuf> =
+                                arc.lock().unwrap().tracked_dirs.keys().cloned().collect();
+                            let mut h = hub.lock().unwrap();
+                            for dir in dirs {
+                                h.release(&dir);
+                            }
                         }
                     }
                 }
