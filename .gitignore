@@ -6,3 +6,6 @@
 .tox
 htmlcov
 mypycov
+/target
+/.vscode
+/.idea
