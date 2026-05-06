@@ -7,72 +7,9 @@ on:
   pull_request:
   workflow_dispatch:
 
-defaults:
-  run:
-    shell: bash
-
 jobs:
   build:
-    name: Build artifacts
-    strategy:
-      matrix:
-        os:
-          - windows-2022
-          - macos-15-intel
-          - ubuntu-22.04
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Setup environment
-        run: |
-          echo TRIPLE_SUFFIX=${{ startsWith(matrix.os, 'windows') && 'pc-windows-msvc' || (startsWith(matrix.os, 'macos') && 'apple-darwin' || 'unknown-linux-gnu') }} >> $GITHUB_ENV
-          echo OS_NAME=${{ startsWith(matrix.os, 'windows') && 'windows' || (startsWith(matrix.os, 'macos') && 'osx' || 'linux') }} >> $GITHUB_ENV
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Setup toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-${{ env.TRIPLE_SUFFIX }},aarch64-${{ env.TRIPLE_SUFFIX }}
-      - name: Setup cross-compilation toolchain
-        run: |
-          sudo apt install -y gcc-aarch64-linux-gnu
-          echo -e '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
-        if: ${{ env.OS_NAME == 'linux' }}
-      - name: Build for x86_64
-        run: cargo build --profile release
-      - name: Run parity check
-        run: ./scripts/parity_check.sh --no-build
-      - name: Run performance check
-        run: ./scripts/perf_check.sh
-      - name: Run watchdog check
-        run: ./scripts/watchdog_check.sh
-        if: ${{ env.OS_NAME != 'windows' }}
-      - name: Run watchdog check (Windows)
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/watchdog_check.ps1
-        if: ${{ env.OS_NAME == 'windows' }}
-      - name: Build for aarch64
-        run: cargo build --profile release --target aarch64-${{ env.TRIPLE_SUFFIX }}
-      - name: Create universal binary
-        run: |
-          lipo -create -output rust-watcher target/release/rust-watcher target/aarch64-apple-darwin/release/rust-watcher
-          mv rust-watcher target/release/rust-watcher
-        if: ${{ env.OS_NAME == 'osx' }}
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.OS_NAME }}-${{ env.OS_NAME == 'osx' && 'universal2' || 'x64' }}
-          path: target/release/rust-watcher${{ env.OS_NAME == 'windows' && '.exe' || '' }}
-      - name: Upload aarch64 binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.OS_NAME }}-arm64
-          path: target/aarch64-${{ env.TRIPLE_SUFFIX }}/release/rust-watcher
-        if: ${{ env.OS_NAME == 'linux' }}
+    uses: ./.github/workflows/build.yml
   push:
     name: Push artifacts
     needs: build
