@@ -1,0 +1,63 @@
+[package]
+name = "rust-watcher"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+globset = "0.4"
+notify = "8"
+walkdir = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+camino = "1.2.2"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = ">=0.51", features = ["Wdk_System_Threading", "Win32_System_Threading"] }
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true
+panic = "abort"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+absolute_paths = "warn"
+case_sensitive_file_extension_comparisons = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+empty_drop = "warn"
+empty_enum_variants_with_brackets = "warn"
+empty_structs_with_brackets = "warn"
+error_impl_error = "warn"
+float_arithmetic = "warn"
+if_then_some_else_none = "warn"
+lossy_float_literal = "warn"
+missing_panics_doc = "allow"
+mixed_read_write_in_expression = "warn"
+multiple_inherent_impl = "warn"
+multiple_unsafe_ops_per_block = "warn"
+mutex_integer = "warn"
+needless_pass_by_value = "allow"
+needless_raw_strings = "warn"
+partial_pub_fields = "warn"
+precedence_bits = "warn"
+pub_without_shorthand = "warn"
+redundant_type_annotations = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+str_to_string = "warn"
+string_add = "warn"
+string_lit_chars_any = "warn"
+struct_field_names = "allow"
+tests_outside_test_module = "warn"
+too_many_lines = "allow"
+unnecessary_self_imports = "warn"
+unneeded_field_pattern = "warn"
+unseparated_literal_suffix = "warn"
+unused_trait_names = "warn"

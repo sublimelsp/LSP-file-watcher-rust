@@ -1,0 +1,8 @@
+.github/ export-ignore
+.gitignore export-ignore
+tox.ini export-ignore
+Cargo.lock export-ignore
+Cargo.toml export-ignore
+scripts/ export-ignore
+src/ export-ignore
+pyproject.toml export-ignore

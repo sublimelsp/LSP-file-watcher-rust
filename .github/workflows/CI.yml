@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+  push:
+    name: Push artifacts
+    needs: build
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Setup repo
+        run: |
+          git config user.name `git log --format=%an -1`
+          git config user.email `git log --format=%ae -1`
+          git checkout --orphan built
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+      - name: Commit repo
+        run: |
+          find -name 'rust-watcher*' -exec chmod +x {} +
+          git add --all
+          git commit -m "Built artifacts for ${{ github.sha }}"
+      - name: Fetch newest commit
+        run: |
+          git fetch origin
+          echo NEWEST_COMMIT=`git rev-parse origin/main` >> $GITHUB_ENV
+      - name: Push repo
+        run: git push -f origin built
+        if: ${{ env.NEWEST_COMMIT == github.sha }}

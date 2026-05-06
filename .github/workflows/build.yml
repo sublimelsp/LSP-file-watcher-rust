@@ -1,0 +1,84 @@
+name: Build
+
+on:
+  workflow_call:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build artifacts
+    strategy:
+      matrix:
+        os:
+          - windows-2022
+          - macos-15-intel
+          - macos-15
+          - ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Setup environment
+        run: |
+          case "${{ matrix.os }}" in
+            windows*)
+              echo "TRIPLE_SUFFIX=pc-windows-msvc" >> $GITHUB_ENV
+              echo "OS_NAME=windows-x64" >> $GITHUB_ENV
+              ;;
+            macos-15-intel)
+              echo "TRIPLE_SUFFIX=apple-darwin" >> $GITHUB_ENV
+              echo "OS_NAME=osx-x64" >> $GITHUB_ENV
+              ;;
+            macos-15)
+              echo "TRIPLE_SUFFIX=apple-darwin" >> $GITHUB_ENV
+              echo "OS_NAME=osx-arm64" >> $GITHUB_ENV
+              ;;
+            *)
+              echo "TRIPLE_SUFFIX=unknown-linux-gnu" >> $GITHUB_ENV
+              echo "OS_NAME=linux-x64" >> $GITHUB_ENV
+              ;;
+          esac
+      - name: Checkout repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Setup toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-${{ env.TRIPLE_SUFFIX }},aarch64-${{ env.TRIPLE_SUFFIX }}
+      - name: Setup cross-compilation toolchain
+        if: ${{ env.OS_NAME == 'linux-x64' }}
+        run: |
+          sudo apt install -y gcc-aarch64-linux-gnu
+          echo -e '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+      - name: Build
+        run: cargo build --profile release
+      - name: Run parity check
+        run: ./scripts/parity_check.sh --no-build
+      - name: Run performance check
+        run: ./scripts/perf_check.sh
+      - name: Run watchdog check
+        if: ${{ !startsWith(env.OS_NAME, 'windows') }}
+        run: ./scripts/watchdog_check.sh
+      - name: Run watchdog check (Windows)
+        if: ${{ startsWith(env.OS_NAME, 'windows') }}
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/watchdog_check.ps1
+      - name: Build for aarch64
+        if: ${{ env.OS_NAME == 'linux-x64' }}
+        run: cargo build --profile release --target aarch64-${{ env.TRIPLE_SUFFIX }}
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.OS_NAME }}
+          path: target/release/rust-watcher${{ startsWith(env.OS_NAME, 'windows') && '.exe' || '' }}
+      - name: Upload aarch64 binary
+        if: ${{ env.OS_NAME == 'linux-x64' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: target/aarch64-${{ env.TRIPLE_SUFFIX }}/release/rust-watcher
