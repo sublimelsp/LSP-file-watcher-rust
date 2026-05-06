@@ -27,19 +27,8 @@ jobs:
           path: artifacts
       - name: Upload artifacts to release
         run: |
-          declare -A PLATFORM_MAP
-          PLATFORM_MAP["osx-universal2"]="osx"
-          PLATFORM_MAP["windows-x64"]="windows-x64"
-          PLATFORM_MAP["linux-x64"]="linux-x64"
-          PLATFORM_MAP["linux-arm64"]="linux-arm64"
-
           find artifacts -mindepth 1 -maxdepth 1 -type d | while read dir; do
-            artifact_name=$(basename "$dir")
-            platform_key="${PLATFORM_MAP[$artifact_name]}"
-            if [ -z "$platform_key" ]; then
-              echo "Unknown artifact: $artifact_name, skipping"
-              continue
-            fi
+            platform_key=$(basename "$dir")
             archive="LSP-file-watcher-rust_${platform_key}.zip"
             git archive --format=zip HEAD > "$archive"
             binary=$(find "$dir" -name 'rust-watcher*' | head -1)
