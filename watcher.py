@@ -16,13 +16,10 @@ from typing import Callable
 from typing import cast
 from typing import IO
 from typing import Protocol
-import sublime
 import subprocess
 import weakref
 
-platform = sublime.platform()
-binary_name = '{}-{}'.format(platform, 'universal2' if platform == 'osx' else sublime.arch())
-RUST_WATCHER_CLI_PATH = (Path(__file__).parent / binary_name / 'rust-watcher')
+RUST_WATCHER_CLI_PATH = (Path(__file__).parent / 'rust-watcher')
 
 Uid = str
 
