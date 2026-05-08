@@ -17,6 +17,7 @@ from typing import cast
 from typing import IO
 from typing import Protocol
 import subprocess
+import sys
 import weakref
 
 RUST_WATCHER_CLI_PATH = (Path(__file__).parent / 'rust-watcher')
@@ -59,9 +60,17 @@ class ProcessHandler(TransportCallbacks[str]):
         self._start_process()
 
     def _start_process(self) -> None:
-        # log('Starting watcher process')
-        process = subprocess.Popen(
-            [RUST_WATCHER_CLI_PATH], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        startupinfo = None
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.SW_HIDE | subprocess.STARTF_USESHOWWINDOW
+        process = subprocess.Popen(  # noqa: S603
+            [RUST_WATCHER_CLI_PATH],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            startupinfo=startupinfo
+        )
         if not process or not process.stdin or not process.stdout:
             raise RuntimeError('Failed initializing watcher process')
         self._transport = ProcessTransport(
