@@ -349,6 +349,9 @@ impl PatternMatcher {
 const CHANGE_THROTTLE_MS: u64 = 50;
 const REMOVE_THROTTLE_MS: u64 = 100;
 const ATOMIC_WINDOW_MS: u64 = 100;
+const DEBOUNCE_MS: u64 = 400;
+// Hard cap: flush the queue even during continuous events to prevent unbounded growth.
+const MAX_DEBOUNCE_MS: u64 = 4_000;
 
 struct WatcherState {
     uid: usize,
@@ -821,7 +824,8 @@ fn dispatch_worker(
 }
 
 fn handle_reports(queue: Queue, states: States) -> ! {
-    let debounce = Duration::from_millis(400);
+    let debounce = Duration::from_millis(DEBOUNCE_MS);
+    let max_debounce = Duration::from_millis(MAX_DEBOUNCE_MS);
     let min_sleep = Duration::from_millis(10);
     let mut to_sleep = debounce;
 
@@ -856,11 +860,18 @@ fn handle_reports(queue: Queue, states: States) -> ! {
             to_sleep = to_sleep.min(time_to.max(min_sleep));
         }
 
-        // Drain and emit if the debounce period has passed since the last report.
+        // Drain and emit when either:
+        //  - 400 ms have passed since the last report (normal debounce), or
+        //  - 4 s have passed since the first report in the batch (max-wait cap).
+        // Without the cap the queue grows without bound when events arrive
+        // continuously (e.g. an LSP server analysing a large Python tree).
         let q = if let Ok(mut g) = queue.try_lock() {
             let Some(last) = g.last() else { continue };
             let handle_at = last.timestamp + debounce;
-            if let Some(remaining) = handle_at.checked_duration_since(Instant::now()) {
+            // SAFETY: last is Some, so first is also Some.
+            let force_at = g.first().unwrap().timestamp + max_debounce;
+            let earliest_flush = handle_at.min(force_at);
+            if let Some(remaining) = earliest_flush.checked_duration_since(Instant::now()) {
                 to_sleep = to_sleep.min(remaining);
                 continue;
             }
