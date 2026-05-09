@@ -780,6 +780,16 @@ fn dispatch_worker(
     states: States,
 ) {
     while let Ok(event) = rx.recv() {
+        // notify's inotify backend (v8) subscribes to IN_OPEN/IN_CLOSE_*, surfacing
+        // them as EventKind::Access(Open|Close). Our own fs::read_dir in
+        // handle_directory triggers IN_OPEN on that directory, which would loop
+        // back here and call read_dir again — unbounded feedback that pins CPU
+        // and bloats RAM. Access events also tell us nothing about file
+        // existence or contents, so drop them outright.
+        if matches!(event.kind, notify::EventKind::Access(_)) {
+            continue;
+        }
+
         // Stat each path once; reuse across all watchers.
         let path_kinds: Vec<(Utf8PathBuf, PathKind)> = event
             .paths
