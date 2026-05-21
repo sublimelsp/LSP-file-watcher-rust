@@ -726,7 +726,9 @@ impl Hub {
         *n += 1;
         if *n == 1 {
             if let Err(e) = self.watcher.watch(path.as_std_path(), WATCH_MODE) {
-                eprintln!("watch({path}) failed: {e:?}");
+                if !matches!(e.kind, notify::ErrorKind::PathNotFound) {
+                    eprintln!("watch({path}) failed: {e:?}");
+                }
             }
         }
     }
