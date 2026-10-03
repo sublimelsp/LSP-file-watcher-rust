@@ -1,0 +1,35 @@
+name: Leak check
+
+# Temporary reproduction for sublimelsp/LSP-file-watcher-rust#20.
+on:
+  push:
+    branches:
+      - ci/windows-leak-repro
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  leak:
+    name: Leak check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-2022
+          - windows-2025
+          - ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: pip install psutil
+      - run: cargo build --profile release
+      - name: Run leak check
+        run: python scripts/leak_check.py --duration 240 --interval 10 --limit-mb 200
