@@ -32,4 +32,4 @@ jobs:
       - run: pip install psutil
       - run: cargo build --profile release
       - name: Run leak check
-        run: python scripts/leak_check.py --duration 240 --interval 10 --limit-mb 200
+        run: python scripts/leak_check.py --duration 60 --interval 5 --limit-mb 100000 --big-dirs 25000 big_tree

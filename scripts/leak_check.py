@@ -158,14 +158,16 @@ SCENARIOS = {
     'dir_churn': wl_dir_churn,
     'git_like': wl_git_like,
     'reregister': wl_reregister,
+    # Large tree, no activity: on Windows each watched dir costs a handle + 16 KB notify buffer.
+    'big_tree': wl_idle,
 }
 
 
-def run(name: str, duration: float, interval: float) -> dict:
+def run(name: str, duration: float, interval: float, big_dirs: int) -> dict:
     workload = SCENARIOS[name]
     # resolve(): expand macOS /var symlink and Windows 8.3 short names (RUNNER~1).
     root = Path(tempfile.mkdtemp(prefix=f'lspfw-leak-{name}-')).resolve()
-    files = make_tree(root)
+    files = make_tree(root, dirs=big_dirs, files_per_dir=1) if name == 'big_tree' else make_tree(root)
     w = Watcher()
     for uid, pats in enumerate(PATTERNS, 1):
         w.register(uid, root, pats)
@@ -213,13 +215,14 @@ def main() -> int:
     ap.add_argument('--duration', type=float, default=120)
     ap.add_argument('--interval', type=float, default=5)
     ap.add_argument('--limit-mb', type=float, default=200)
+    ap.add_argument('--big-dirs', type=int, default=20000, help='big_tree: number of pkgN/sub dir pairs')
     args = ap.parse_args()
 
     if not RUST_BIN.exists():
         print(f'leak_check: {RUST_BIN} not found — build the release binary first', file=sys.stderr)
         return 1
 
-    results = [run(s, args.duration, args.interval) for s in args.scenarios]
+    results = [run(s, args.duration, args.interval, args.big_dirs) for s in args.scenarios]
 
     print('\nSummary')
     print(f'{"scenario":12s} {"start MB":>9s} {"peak MB":>9s} {"end MB":>9s} {"handles":>15s} {"iters":>7s}')
