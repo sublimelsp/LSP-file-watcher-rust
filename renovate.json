@@ -2,5 +2,11 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "github>sublimelsp/renovate-preset"
+  ],
+  "packageRules": [
+    {
+      "groupName": "cargo dependencies",
+      "matchManagers": ["cargo"]
+    }
   ]
 }
