@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from .transports import AbstractProcessor
-from .transports import ProcessTransport
-from .transports import StopLoopError
-from .transports import Transport
-from .transports import TransportCallbacks
+from .plugin.transports import AbstractProcessor
+from .plugin.transports import ProcessTransport
+from .plugin.transports import StopLoopError
+from .plugin.transports import Transport
+from .plugin.transports import TransportCallbacks
 from json import dumps
 from LSP.plugin import FileWatcher
 from LSP.plugin import FileWatcherEvent
