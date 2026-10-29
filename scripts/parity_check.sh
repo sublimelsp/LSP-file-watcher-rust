@@ -65,6 +65,9 @@ drive() {
   rm "$dir/b.txt"
   sleep 0.7
   mkdir "$dir/sub"
+  # chokidar 3 reads a new directory before it starts watching it, so a file
+  # created in between is never reported. Give it time to set up the watch.
+  sleep 0.3
   touch "$dir/sub/c.txt"
   sleep 0.7
   rm "$dir/sub/c.txt"
