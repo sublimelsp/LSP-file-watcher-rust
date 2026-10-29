@@ -440,6 +440,12 @@ impl WatcherState {
         if !path.starts_with(&self.cwd) {
             return;
         }
+        // Recursive watches (macOS/Windows) also report events from ignored
+        // subtrees such as .git or node_modules. Without this, handle_directory
+        // would start tracking those directories.
+        if path != self.cwd && self.matcher.is_ignored(path) {
+            return;
+        }
         match kind {
             PathKind::Missing => self.handle_deletion(path.to_path_buf(), released),
             PathKind::Dir => self.handle_directory(path.to_path_buf(), queue, acquired, released),
@@ -701,19 +707,25 @@ impl WatcherState {
 // recursive watch on each registration's cwd and rely on PatternMatcher /
 // WatcherState to filter sub-tree events in user space (mirroring chokidar 3).
 //
-// On Linux/Windows the inotify/ReadDirectoryChangesW backends do not support
-// recursive natively, so notify simulates it by watching each directory
-// individually. With overlapping registrations (common in LSP), per-dir
-// refcounting via Hub avoids redundant kernel-level watches on the same inode.
-#[cfg(target_os = "macos")]
+// ReadDirectoryChangesW on Windows watches a subtree natively too. Watching
+// each directory there costs a directory handle, a semaphore and a 16 KB buffer
+// per directory, which reaches gigabytes on large trees, so Windows also uses
+// one recursive watch per cwd.
+//
+// inotify on Linux does not support recursive watches, so notify would simulate
+// it by watching each directory individually anyway. Doing that here instead
+// keeps ignored subtrees unwatched, and per-dir refcounting via Hub avoids
+// redundant watches on the same inode across overlapping registrations (common
+// in LSP).
+#[cfg(any(target_os = "macos", windows))]
 const WATCH_MODE: notify::RecursiveMode = notify::RecursiveMode::Recursive;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 const WATCH_MODE: notify::RecursiveMode = notify::RecursiveMode::NonRecursive;
 
 // Owns the single RecommendedWatcher and refcounts OS-level watches.
 //
-// On Linux/Windows the keys are every directory inside each registration's
-// tracked subtree. On macOS the keys are the registration cwds (one recursive
+// On Linux the keys are every directory inside each registration's tracked
+// subtree. On macOS/Windows the keys are the registration cwds (one recursive
 // watch per cwd, deduplicated across overlapping registrations).
 struct Hub {
     watcher: notify::RecommendedWatcher,
@@ -756,13 +768,13 @@ fn register_watcher(reg: Register, hub: HubHandle, states: States) {
     let mut state = WatcherState::new(uid, cwd, reg.events, matcher);
     state.initial_scan();
 
-    // macOS: a single recursive FSEvents watch on cwd covers the whole subtree.
-    // Other OSes: one non-recursive watch per directory discovered in the scan.
-    #[cfg(target_os = "macos")]
+    // macOS/Windows: a single recursive watch on cwd covers the whole subtree.
+    // Linux: one non-recursive watch per directory discovered in the scan.
+    #[cfg(any(target_os = "macos", windows))]
     {
         hub.lock().unwrap().acquire(&state.cwd);
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let dirs: Vec<Utf8PathBuf> = state.tracked_dirs.keys().cloned().collect();
         let mut h = hub.lock().unwrap();
@@ -816,9 +828,9 @@ fn dispatch_worker(
             }
         }
 
-        // The recursive macOS watch already covers any new sub-directory, so
-        // the deltas WatcherState produces are simply discarded there.
-        #[cfg(not(target_os = "macos"))]
+        // The recursive macOS/Windows watch already covers any new sub-directory,
+        // so the deltas WatcherState produces are simply discarded there.
+        #[cfg(not(any(target_os = "macos", windows)))]
         if !acquired.is_empty() || !released.is_empty() {
             let mut h = hub.lock().unwrap();
             for dir in acquired {
@@ -983,12 +995,12 @@ fn main() {
                 match state {
                     None => eprintln!("watcher with ID {uid} not found"),
                     Some(arc) => {
-                        #[cfg(target_os = "macos")]
+                        #[cfg(any(target_os = "macos", windows))]
                         {
                             let cwd = arc.lock().unwrap().cwd.clone();
                             hub.lock().unwrap().release(&cwd);
                         }
-                        #[cfg(not(target_os = "macos"))]
+                        #[cfg(not(any(target_os = "macos", windows)))]
                         {
                             let dirs: Vec<Utf8PathBuf> =
                                 arc.lock().unwrap().tracked_dirs.keys().cloned().collect();
