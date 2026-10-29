@@ -7,6 +7,12 @@
     {
       "groupName": "cargo dependencies",
       "matchManagers": ["cargo"]
+    },
+    {
+      "description": "Crates are built into the shipped binary, so their updates are released",
+      "matchManagers": ["cargo"],
+      "matchDepTypes": ["dependencies"],
+      "semanticCommitType": "fix"
     }
   ]
 }

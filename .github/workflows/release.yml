@@ -1,18 +1,40 @@
 name: Release
 
 on:
-  release:
-    types:
-      - published
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: auto releases only if the commits need it. patch, minor and major always release.
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+      dry-run:
+        description: Only report the release that would be made.
+        type: boolean
+        default: false
 
+permissions:
+  contents: write
 
 jobs:
+  release:
+    uses: sublimelsp/lsp_release_workflow/.github/workflows/release.yml@v1
+    with:
+      bump: ${{ inputs.bump || 'auto' }}
+      dry-run: ${{ inputs.dry-run == true }}
+  # The release is created with GITHUB_TOKEN, which doesn't trigger other workflows, so the artifacts are built and
+  # uploaded here.
   build:
+    needs: release
+    if: ${{ needs.release.outputs.tag }}
     uses: ./.github/workflows/build.yml
   push:
     name: Push artifacts
-    needs: build
-    if: ${{ needs.build.result == 'success' }}
+    needs: [release, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -36,31 +58,37 @@ jobs:
               chmod +x "$binary"
               zip -j "$archive" "$binary"
             fi
-            gh release upload "${{ github.event.release.tag_name }}" "$archive" --clobber --repo "${{ github.repository }}"
+            gh release upload "$TAG" "$archive" --clobber --repo "${{ github.repository }}"
           done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release.outputs.tag }}
   notify:
     name: Notify LSP packages registry
-    needs: push
+    needs: [release, push]
     runs-on: ubuntu-latest
     steps:
+      - name: Build event payload
+        id: payload
+        run: |
+          {
+            echo 'json<<EOF'
+            gh api "repos/${{ github.repository }}/releases/tags/$TAG" --jq '{
+              release: {tag_name, published_at, body, assets_url},
+              repository: {
+                name: ${{ toJSON(github.event.repository.name) }},
+                html_url: ${{ toJSON(github.event.repository.html_url) }}
+              }
+            }'
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release.outputs.tag }}
       - name: Dispatch lsp-add-or-update-package event
         uses: peter-evans/repository-dispatch@v4.0.1
         with:
           token: ${{ secrets.LSP_UTILS_REPOSITORY_DISPATCH_TOKEN }}
           repository: sublimelsp/repository
           event-type: lsp-add-or-update-package
-          client-payload: |-
-            {
-              "release": {
-                "tag_name": ${{ toJSON(github.event.release.tag_name) }},
-                "published_at": ${{ toJSON(github.event.release.published_at) }},
-                "body": ${{ toJSON(github.event.release.body) }},
-                "assets_url": ${{ toJSON(github.event.release.assets_url) }}
-              },
-              "repository": {
-                "name": ${{ toJSON(github.event.repository.name) }},
-                "html_url": ${{ toJSON(github.event.repository.html_url) }}
-              }
-            }
+          client-payload: ${{ steps.payload.outputs.json }}
