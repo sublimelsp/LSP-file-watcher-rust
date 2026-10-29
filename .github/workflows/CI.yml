@@ -10,3 +10,18 @@ on:
 jobs:
   build:
     uses: ./.github/workflows/build.yml
+
+  # A single check whose name doesn't depend on the os matrix, for rulesets to require. It runs even when the workflow
+  # is cancelled: a skipped job counts as passing for a required check.
+  result:
+    name: CI result
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check build result
+        env:
+          RESULT: ${{ needs.build.result }}
+        run: |
+          echo "Build result: $RESULT"
+          test "$RESULT" = success
