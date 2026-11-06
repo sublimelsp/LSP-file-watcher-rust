@@ -26,7 +26,7 @@ Uid = str
 
 
 def log(message: str) -> None:
-    print(f'{__package__}: {message}')
+    print(f'[{__package__}] {message}')
 
 
 class StringTransportHandler(AbstractProcessor[str]):
